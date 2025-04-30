@@ -121,7 +121,7 @@ $logoBox.SizeMode = "StretchImage"
 $containerSystemInfo.Controls.Add($logoBox)
 
 try {
-    $logoUrl = https://i.ibb.co/zTJs6M7Y/Chat-GPT-Image-Apr-25-2025-10-02-08-AM.png
+    $logoUrl = "https://ibb.co/7d4vkfR5"
     $client = New-Object System.Net.WebClient
     $imageBytes = $client.DownloadData($logoUrl)
     $memoryStream = New-Object System.IO.MemoryStream($imageBytes)
