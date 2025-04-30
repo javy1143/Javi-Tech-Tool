@@ -492,7 +492,11 @@ $btnRunPrefs.Add_Click({
 })
 
 
-# --- Windows Updates Tab with Selection + Restart ---
+# Required types
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.ComponentModel
+
+# --- Windows Updates Tab with Async Install, Selection & Restart ---
 $tabUpdates = Add-Tab "Windows Updates"
 $containerUpdates = New-Object System.Windows.Forms.Panel
 $containerUpdates.Dock = "Fill"
@@ -537,7 +541,7 @@ function New-UpdateButton($text, $x, $y) {
     $btn.BackColor = [System.Drawing.Color]::FromArgb(0, 94, 184)
     $btn.ForeColor = [System.Drawing.Color]::White
     $btn.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-    $btn
+    return $btn
 }
 
 $btnLoadAll = New-UpdateButton "Load All Updates" 0 5
@@ -596,28 +600,28 @@ function Install-UpdatesAsync($updates) {
     $worker = New-Object System.ComponentModel.BackgroundWorker
     $worker.WorkerReportsProgress = $true
 
-    $worker.DoWork += {
+    $worker.add_DoWork({
         for ($i = 0; $i -lt $updates.Count; $i++) {
             $update = $updates[$i]
             Install-WindowsUpdate -MicrosoftUpdate -KBArticleID $update.KB -AcceptAll -IgnoreReboot -ErrorAction SilentlyContinue
             $worker.ReportProgress($i + 1, "Installed KB$($update.KB)")
         }
-    }
+    })
 
-    $worker.ProgressChanged += {
+    $worker.add_ProgressChanged({
         param($s, $e)
         $progressBarUpdates.Value = $e.ProgressPercentage
         $lblStatusUpdates.Text = "Status: $($e.UserState)"
         $form.Refresh()
-    }
+    })
 
-    $worker.RunWorkerCompleted += {
+    $worker.add_RunWorkerCompleted({
         $lblStatusUpdates.Text = "Status: Updates installed"
         $progressBarUpdates.Visible = $false
         $listUpdates.Items.Clear()
         $script:allUpdates = @()
         $script:securityUpdates = @()
-    }
+    })
 
     $worker.RunWorkerAsync()
 }
@@ -664,9 +668,6 @@ $btnRestart.Add_Click({
         Restart-Computer -Force
     }
 })
-
-
-
 
 # --- Startup Manager Tab (Final Fixed Version) ---
 $tabStartup = Add-Tab "Startup Manager"
