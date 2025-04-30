@@ -669,20 +669,18 @@ $btnRestart.Add_Click({
     }
 })
 
-# --- Startup Manager Tab (Final Fixed Version) ---
+### Startup Manager Tab ###
 $tabStartup = Add-Tab "Startup Manager"
 $containerStartup = New-Object System.Windows.Forms.Panel
 $containerStartup.Dock = "Fill"
 $containerStartup.BackColor = $form.BackColor
 $tabStartup.Controls.Add($containerStartup)
 
-# Filter Controls
 $lblFilter = New-Object System.Windows.Forms.Label
 $lblFilter.Location = New-Object System.Drawing.Point(10, 80)
 $lblFilter.Size = New-Object System.Drawing.Size(60, 25)
 $lblFilter.Text = "Filter:"
 $lblFilter.ForeColor = [System.Drawing.Color]::White
-$lblFilter.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 $containerStartup.Controls.Add($lblFilter)
 
 $comboFilter = New-Object System.Windows.Forms.ComboBox
@@ -692,11 +690,9 @@ $comboFilter.Items.AddRange(@("All", "Current User", "Local Machine", "Startup F
 $comboFilter.SelectedIndex = 0
 $comboFilter.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
 $comboFilter.ForeColor = [System.Drawing.Color]::White
-$comboFilter.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 $comboFilter.DropDownStyle = "DropDownList"
 $containerStartup.Controls.Add($comboFilter)
 
-# ListView
 $lvStartup = New-Object System.Windows.Forms.ListView
 $lvStartup.Location = New-Object System.Drawing.Point(10, 110)
 $lvStartup.Size = New-Object System.Drawing.Size(650, 250)
@@ -707,20 +703,17 @@ $lvStartup.GridLines = $true
 $lvStartup.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
 $lvStartup.ForeColor = [System.Drawing.Color]::White
 $lvStartup.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-
 $lvStartup.Columns.Add("Name", 180) | Out-Null
 $lvStartup.Columns.Add("Hive", 100) | Out-Null
 $lvStartup.Columns.Add("Enabled", 80) | Out-Null
 $lvStartup.Columns.Add("Command", 280) | Out-Null
 $containerStartup.Controls.Add($lvStartup)
 
-# Status label
 $lblStartupStatus = New-Object System.Windows.Forms.Label
 $lblStartupStatus.Location = New-Object System.Drawing.Point(10, 370)
 $lblStartupStatus.Size = New-Object System.Drawing.Size(640, 25)
 $lblStartupStatus.Text = "Status: Ready"
 $lblStartupStatus.ForeColor = [System.Drawing.Color]::White
-$lblStartupStatus.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 $containerStartup.Controls.Add($lblStartupStatus)
 
 function Load-StartupItems {
@@ -736,10 +729,8 @@ function Load-StartupItems {
         if (Test-Path $path) {
             $items = Get-ItemProperty $path
             foreach ($prop in $items.PSObject.Properties) {
-                $value = $items.$($prop.Name)
-                if ($value.Length -ge 1) {
-                    $approved[$prop.Name] = ($value[0] -eq 2)
-                }
+                $val = $items.$($prop.Name)
+                if ($val.Length -ge 1) { $approved[$prop.Name] = ($val[0] -eq 2) }
             }
         }
     }
@@ -749,25 +740,13 @@ function Load-StartupItems {
         @{ Path = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"; Hive = "HKLM" }
     )
     foreach ($src in $regSources) {
-        if ($src.Hive -eq "HKLM") {
-            $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
-            $subKey = $baseKey.OpenSubKey("Software\Microsoft\Windows\CurrentVersion\Run")
-            if ($subKey) {
-                foreach ($name in $subKey.GetValueNames()) {
-                    $cmd = $subKey.GetValue($name)
-                    $enabled = if ($approved.ContainsKey($name)) { $approved[$name] } else { $true }
-                    $script:startupItems += [PSCustomObject]@{
-                        Name = [string]$name; Hive = [string]$src.Hive; Enabled = $enabled; Command = [string]$cmd
-                    }
-                }
-            }
-        } elseif (Test-Path $src.Path) {
+        if (Test-Path $src.Path) {
             $props = Get-ItemProperty $src.Path
             foreach ($name in $props.PSObject.Properties.Name) {
                 $cmd = $props.$name
                 $enabled = if ($approved.ContainsKey($name)) { $approved[$name] } else { $true }
                 $script:startupItems += [PSCustomObject]@{
-                    Name = [string]$name; Hive = [string]$src.Hive; Enabled = $enabled; Command = [string]$cmd
+                    Name = $name; Hive = $src.Hive; Enabled = $enabled; Command = $cmd
                 }
             }
         }
@@ -781,21 +760,15 @@ function Load-StartupItems {
     foreach ($folder in $startupFolders) {
         if (Test-Path $folder) {
             $fobj = $shell.NameSpace($folder)
-            if ($fobj) {
-                $items = $fobj.Items()
-                for ($i = 0; $i -lt $items.Count; $i++) {
-                    $item = $items.Item($i)
-                    if ($item.Name -like "*.lnk") {
-                        try {
-                            $link = $item.GetLink()
-                            $target = $link.Path
-                            $name = [System.IO.Path]::GetFileNameWithoutExtension($item.Name)
-                            $script:startupItems += [PSCustomObject]@{
-                                Name = [string]$name; Hive = "StartupFolder"; Enabled = $true; Command = [string]$target
-                            }
-                        } catch {
-                            continue
-                        }
+            $items = $fobj.Items()
+            for ($i = 0; $i -lt $items.Count; $i++) {
+                $item = $items.Item($i)
+                if ($item.Name -like "*.lnk") {
+                    $link = $item.GetLink()
+                    $target = $link.Path
+                    $name = [System.IO.Path]::GetFileNameWithoutExtension($item.Name)
+                    $script:startupItems += [PSCustomObject]@{
+                        Name = $name; Hive = "StartupFolder"; Enabled = $true; Command = $target
                     }
                 }
             }
@@ -812,14 +785,10 @@ function Load-StartupItems {
     }
 
     foreach ($item in $filtered) {
-        $entry = New-Object System.Windows.Forms.ListViewItem([string]$item.Name)
-        $entry.SubItems.Add([string]$item.Hive) | Out-Null
-        if ($item.Enabled) {
-            $entry.SubItems.Add("Yes") | Out-Null
-        } else {
-            $entry.SubItems.Add("No") | Out-Null
-        }
-        $entry.SubItems.Add([string]$item.Command) | Out-Null
+        $entry = New-Object System.Windows.Forms.ListViewItem($item.Name)
+        $entry.SubItems.Add($item.Hive) | Out-Null
+        $entry.SubItems.Add(($item.Enabled) ? "Yes" : "No") | Out-Null
+        $entry.SubItems.Add($item.Command) | Out-Null
         $entry.Checked = $item.Enabled
         $lvStartup.Items.Add($entry) | Out-Null
     }
@@ -827,19 +796,26 @@ function Load-StartupItems {
     $lblStartupStatus.Text = "Status: Loaded $($filtered.Count) startup item(s)"
 }
 
+function Toggle-StartupApproval {
+    foreach ($entry in $lvStartup.Items) {
+        $item = $script:startupItems | Where-Object { $_.Name -eq $entry.Text } | Select-Object -First 1
+        if ($item -and $item.Hive -ne "StartupFolder") {
+            $hiveKey = if ($item.Hive -eq "HKCU") {
+                "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+            } else {
+                "HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+            }
+            $value = if ($entry.Checked) { 2 } else { 3 }
+            $bytes = ,$value + (,0 * 11)  # 12-byte structure
+            Set-ItemProperty -Path $hiveKey -Name $item.Name -Value $bytes -ErrorAction SilentlyContinue
+        }
+    }
+    Load-StartupItems
+}
+
 $comboFilter.Add_SelectedIndexChanged({ Load-StartupItems })
+$lvStartup.add_ItemChecked({ Toggle-StartupApproval })
 Load-StartupItems
-
-
-
-# Resize Event
-$form.Add_Resize({
-    $btnRunSpeed.Location = New-Object System.Drawing.Point(($btnPanelSpeed.Width - $btnRunSpeed.Width - 10), 5)
-    $btnSelectAllSpeed.Location = New-Object System.Drawing.Point(($btnPanelSpeed.Width - $btnRunSpeed.Width - $btnSelectAllSpeed.Width - 20), 5)
-    $btnRunPrefs.Location = New-Object System.Drawing.Point(($btnPanelPrefs.Width - $btnRunPrefs.Width - 10), 5)
-    $btnSelectAllPrefs.Location = New-Object System.Drawing.Point(($btnPanelPrefs.Width - $btnRunPrefs.Width - $btnSelectAllPrefs.Width - 20), 5)
-    $btnApplyStartupChanges.Location = New-Object System.Drawing.Point(($btnPanelStartup.Width - $btnApplyStartupChanges.Width - 10), 5)
-})
 
 # Show Form
 $form.Topmost = $true
