@@ -1,5 +1,3 @@
-﻿# Win11Optimizer.ps1 - Updated with Filter Dropdown for Startup Manager
-
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
