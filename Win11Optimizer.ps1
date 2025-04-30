@@ -1,5 +1,3 @@
-﻿# Win11Optimizer.ps1 - Fixed and Optimized
-
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
@@ -123,7 +121,7 @@ $logoBox.SizeMode = "StretchImage"
 $containerSystemInfo.Controls.Add($logoBox)
 
 try {
-    $logoUrl = "https://i.ibb.co/zTJs6M7/Chat-GPT-Image-Apr-25-2025-10-02-08-AM.png"
+    $logoUrl = "https://i.ibb.co/zTJs6M7Y/Chat-GPT-Image-Apr-25-2025-10-02-08-AM.png"
     $client = New-Object System.Net.WebClient
     $imageBytes = $client.DownloadData($logoUrl)
     $memoryStream = New-Object System.IO.MemoryStream($imageBytes)
