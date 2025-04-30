@@ -607,11 +607,13 @@ function Install-UpdatesAsync($updates) {
     })
 
     $worker.add_ProgressChanged({
-        param($s, $e)
-        $progressBarUpdates.Value = $e.ProgressPercentage
-        $lblStatusUpdates.Text = "Status: $($e.UserState)"
-        $form.Refresh()
-    })
+	    param($s, $e)
+	    $progressBarUpdates.Value = $e.ProgressPercentage
+	    $percent = [math]::Round(($e.ProgressPercentage / $progressBarUpdates.Maximum) * 100)
+	    $lblStatusUpdates.Text = "Status: $($e.UserState) ($percent%)"
+	    $listUpdates.Items.Add("✅ $($e.UserState) ($percent%)") | Out-Null
+	    $form.Refresh()
+	})
 
     $worker.add_RunWorkerCompleted({
         $lblStatusUpdates.Text = "Status: Updates installed"
