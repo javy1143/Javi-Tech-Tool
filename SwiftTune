@@ -560,29 +560,50 @@ function Start-UpdateCheck {
 
     # Define the script to run in the background runspace
     $scriptBlock = {
-        param($UpdateCategory) # Parameter for the script block
+    # Parameter is no longer needed as we removed -Category for testing
+    # param($UpdateCategory)
 
-        # Import the module within this runspace
+    # Define log file path (can reuse function if defined globally or redefine here)
+    $logPath = Join-Path $env:TEMP "SwiftTuneUpdateLog_BG.txt"
+    Function Write-BGLog($message) {
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        "[$timestamp] [BGThread] $message" | Out-File -FilePath $logPath -Append -Encoding UTF8
+    }
+    Clear-Content -Path $logPath -ErrorAction SilentlyContinue # Clear log for this run
+    Write-BGLog "Background script started."
+
+    $updates = $null # Initialize updates variable
+
+    try {
+        Write-BGLog "Attempting to import PSWindowsUpdate module..."
         Import-Module PSWindowsUpdate -Force -ErrorAction Stop
+        Write-BGLog "PSWindowsUpdate module imported."
 
-        # Execute the command
-        $updates = Get-WindowsUpdate -Category $UpdateCategory -IgnoreUserInput -ErrorAction Stop
+        Write-BGLog "Checking WUA service status..."
+        $svc = Get-Service wuauserv -ErrorAction SilentlyContinue
+        if ($svc) {
+            Write-BGLog "WUA Service Status: $($svc.Status)"
+        } else {
+            Write-BGLog "WUA Service (wuauserv) not found or cannot be queried."
+        }
 
-        # Return the results
-        return $updates
+        # --- TEST: Removed -Category and -MicrosoftUpdate ---
+        Write-BGLog "Attempting simplest Get-WindowsUpdate -IgnoreUserInput..."
+        # Run the command and explicitly assign to $updates
+        $updates = Get-WindowsUpdate -IgnoreUserInput -ErrorAction Stop
+        Write-BGLog "Simplest Get-WindowsUpdate command finished. Result IsNullOrEmpty: $([string]::IsNullOrEmpty($updates)). Count (if not null): $($updates.Count)"
+
+    } catch {
+         Write-BGLog "ERROR in background script: $($_.Exception.ToString())"
+         # Ensure $updates is null or empty on error if not already set
+         $updates = $null
+    } finally {
+         Write-BGLog "Background script finished."
     }
-    $psInstance.AddScript($scriptBlock).AddArgument($Category) | Out-Null
 
-    # Start the asynchronous invocation
-    Write-Host "Starting BeginInvoke for category: $Category"
-    $asyncResult = $psInstance.BeginInvoke()
-
-    # Store state for the timer to check
-    $script:currentUpdateJob = @{
-        PowerShellInstance = $psInstance
-        AsyncResult        = $asyncResult
-        CategoryLabel      = $CategoryLabel # Store context for UI update
-    }
+    # Return the results
+    return $updates
+}
 
     # Start the timer to monitor completion
     $checkJobTimer.Start()
