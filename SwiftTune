@@ -417,18 +417,24 @@ function Invoke-InBackground {
 }
 
 
-# WINDOWS UPDATES TAB (Fixed Load Available Updates button)
+# ============================================
+# WINDOWS UPDATES TAB (Using Direct WUA COM Objects)
+# ============================================
+
+# --- Tab Setup ---
 $tabUpdates = New-Object System.Windows.Forms.TabPage
-$tabUpdates.Text = "Windows Updates"
+$tabUpdates.Text = "Windows Updates (WUA)" # Indicate WUA method
 $tabUpdates.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 
+# Add a Label explaining the direct WUA usage and potential freeze
 $updateLabel = New-Object System.Windows.Forms.Label
-$updateLabel.Text = "Manage Windows Updates (select to install)"
+$updateLabel.Text = "Manage Updates via WUA COM (UI will freeze during load/install)"
 $updateLabel.Location = New-Object System.Drawing.Point(20, 10)
 $updateLabel.Size = New-Object System.Drawing.Size(940, 20)
 $updateLabel.ForeColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
 $tabUpdates.Controls.Add($updateLabel)
 
+# --- ListView Setup ---
 $updateListView = New-Object System.Windows.Forms.ListView
 $updateListView.Location = New-Object System.Drawing.Point(20, 40)
 $updateListView.Size = New-Object System.Drawing.Size(940, 500)
@@ -437,14 +443,79 @@ $updateListView.CheckBoxes = $true
 $updateListView.FullRowSelect = $true
 $updateListView.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 $updateListView.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
-$updateListView.Columns.Add("Type", 100)
-$updateListView.Columns.Add("Title", 500)
-$updateListView.Columns.Add("KB", 100)
-$updateListView.Columns.Add("Size", 100)
+$updateListView.Columns.Add("Type", 100)       # Index 0
+$updateListView.Columns.Add("Title", 500)      # Index 1
+$updateListView.Columns.Add("KB", 100)         # Index 2
+$updateListView.Columns.Add("Size (MB)", 100)  # Index 3
+$updateListView.Columns.Add("Downloaded", 80) # Index 4
 $tabUpdates.Controls.Add($updateListView)
 
+
+# --- Function to Get Updates using WUA COM ---
+function Get-UpdatesWUA {
+    param(
+        [string]$Criteria = "IsInstalled=0 and IsHidden=0" # Default criteria
+    )
+    Write-Host "Initializing WUA COM Session..."
+    $updateSession = New-Object -ComObject "Microsoft.Update.Session" -ErrorAction Stop
+    $updateSearcher = $updateSession.CreateUpdateSearcher()
+    $updateSearcher.Online = $true # Search online
+
+    Write-Host "Searching for updates with criteria: $Criteria"
+    try {
+        # Search might take time and can throw COM exceptions
+        $searchResult = $updateSearcher.Search($Criteria)
+        Write-Host "Search completed. Found $($searchResult.Updates.Count) raw updates."
+
+        # Process results into simpler objects for the listview
+        $processedUpdates = @()
+        if ($searchResult.Updates.Count -gt 0) {
+            foreach ($update in $searchResult.Updates) {
+                # Extract properties carefully, handling potential errors or nulls
+                $title = $update.Title
+                $kb = ($update.KBArticleIDs | Select-Object -First 1) # Get first KB if available
+                if ([string]::IsNullOrEmpty($kb)) { $kb = "N/A" }
+                $sizeBytes = $update.MaxDownloadSize
+                $sizeMB = if ($sizeBytes -gt 0) { [math]::Round($sizeBytes / 1MB, 2) } else { 0 }
+                $isDownloaded = $update.IsDownloaded
+                $categories = $update.Categories | ForEach-Object { $_.Name }
+                $type = "Software" # Default
+                if ($categories -contains 'Security Updates') { $type = "Security" }
+                if ($categories -contains 'Update Rollups') { $type = "Rollup" }
+                if ($categories -contains 'Critical Updates') { $type = "Critical" }
+                if ($categories -contains 'Drivers') { $type = "Driver" }
+                # Add more specific types if needed
+
+                # Store essential info and the raw COM object (or its identity)
+                $processedUpdates += [PSCustomObject]@{
+                    Type         = $type
+                    Title        = $title
+                    KB           = $kb
+                    SizeMB       = $sizeMB
+                    IsDownloaded = $isDownloaded
+                    RawUpdateObj = $update # Store the raw COM object for installation
+                    # Alternatively store: UpdateID = $update.Identity.UpdateID; Revision = $update.Identity.RevisionNumber
+                }
+            }
+        }
+        Write-Host "Processed $($processedUpdates.Count) updates for display."
+        return $processedUpdates
+    } catch {
+        Write-Host "Error during WUA search: $($_.Exception.ToString())" -ForegroundColor Red
+        throw "Failed to search for updates using WUA: $($_.Exception.Message)" # Rethrow simplified message
+    } finally {
+        # Release COM objects (optional, PowerShell usually handles this, but good practice)
+        if ($updateSearcher) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($updateSearcher) | Out-Null }
+        if ($updateSession) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($updateSession) | Out-Null }
+        [System.GC]::Collect()
+        [System.GC]::WaitForPendingFinalizers()
+    }
+}
+
+
+# --- Load Updates Button ---
 $loadUpdatesButton = New-Object System.Windows.Forms.Button
-$loadUpdatesButton.Text = "Load Available Updates"
+$loadUpdatesButton.Text = "Load Updates (WUA)"
 $loadUpdatesButton.Size = New-Object System.Drawing.Size(220, 30)
 $loadUpdatesButton.Location = New-Object System.Drawing.Point(20, 550)
 $loadUpdatesButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
@@ -452,29 +523,37 @@ $loadUpdatesButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
 $loadUpdatesButton.Add_Click({
     $updateListView.Items.Clear()
     $progressBar.Style = 'Marquee'
-    $statusLabel.Text = "Loading available updates..."
+    $statusLabel.Text = "Loading available updates using WUA COM... (UI will freeze)"
     $loadUpdatesButton.Enabled = $false
     $installButton.Enabled = $false
-    $form.Refresh()
+    $form.Refresh() # Update UI before blocking
 
     try {
-        $updates = Get-WindowsUpdate -Criteria "IsInstalled=0 and IsHidden=0" -AcceptAll -IgnoreUserInput -Verbose
-        $updateListView.BeginUpdate()
-        foreach ($update in $updates) {
-            $itemLabel = if ($update.Categories -match 'Security Updates') { "Security" } else { "Software" }
-            $size = if ($update.Size) { "$([math]::Round($update.Size / 1MB, 2)) MB" } else { "Unknown" }
-            $item = New-Object System.Windows.Forms.ListViewItem($itemLabel)
-            $item.SubItems.Add($update.Title)
-            $item.SubItems.Add($update.KB)
-            $item.SubItems.Add($size)
-            $item.Tag = $update
-            $updateListView.Items.Add($item)
+        # Call the function that uses WUA COM directly
+        # Using default criteria "IsInstalled=0 and IsHidden=0"
+        $updates = Get-UpdatesWUA
+
+        $updateListView.BeginUpdate() # Improve performance
+        if ($updates -and $updates.Count -gt 0) {
+            foreach ($updateInfo in $updates) {
+                $item = New-Object System.Windows.Forms.ListViewItem($updateInfo.Type)
+                $item.SubItems.Add($updateInfo.Title)
+                $item.SubItems.Add($updateInfo.KB)
+                $item.SubItems.Add($updateInfo.SizeMB.ToString("F2")) # Format size
+                $item.SubItems.Add($updateInfo.IsDownloaded.ToString())
+                $item.Tag = $updateInfo.RawUpdateObj # Store the raw COM object
+                $updateListView.Items.Add($item)
+            }
+             $statusLabel.Text = "WUA Updates loaded ($($updateListView.Items.Count) found)."
+        } else {
+             $statusLabel.Text = "No applicable updates found via WUA."
         }
         $updateListView.EndUpdate()
-        $statusLabel.Text = "Updates loaded ($($updateListView.Items.Count) found)."
+
     } catch {
-        $statusLabel.Text = "Error loading updates."
-        [System.Windows.Forms.MessageBox]::Show("Failed to load updates: $_", "Error", 'OK', 'Error')
+        $statusLabel.Text = "Error loading WUA updates."
+        # Error message thrown from Get-UpdatesWUA or COM exceptions
+        [System.Windows.Forms.MessageBox]::Show("Failed to load updates using WUA:`n`n$($_.Exception.Message)", "WUA Error", 'OK', 'Error')
     } finally {
         $progressBar.Style = 'Blocks'
         $loadUpdatesButton.Enabled = $true
@@ -484,41 +563,101 @@ $loadUpdatesButton.Add_Click({
 })
 $tabUpdates.Controls.Add($loadUpdatesButton)
 
+
+# --- Install Updates Button ---
 $installButton = New-Object System.Windows.Forms.Button
-$installButton.Text = "Install Selected Updates"
+$installButton.Text = "Install Selected (WUA)"
 $installButton.Size = New-Object System.Drawing.Size(220, 30)
-$installButton.Location = New-Object System.Drawing.Point(260, 550)
+$installButton.Location = New-Object System.Drawing.Point(260, 550) # Adjusted position
 $installButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
 $installButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
 $installButton.Add_Click({
-    $selectedUpdates = $updateListView.CheckedItems | ForEach-Object { $_.Tag }
-    if ($selectedUpdates.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("No updates selected.", "Info", 'OK', 'Information')
+    # Get the raw IUpdate COM objects stored in the Tag property of checked items
+    $selectedUpdateCOMObjects = $updateListView.CheckedItems | ForEach-Object { $_.Tag }
+
+    if ($selectedUpdateCOMObjects.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No updates selected to install.", "Info", 'OK', 'Information')
         return
     }
 
+    # Prepare UI for direct install action (will freeze)
     $progressBar.Style = 'Marquee'
-    $statusLabel.Text = "Installing $($selectedUpdates.Count) update(s)..."
+    $statusLabel.Text = "Preparing WUA installation for $($selectedUpdateCOMObjects.Count) update(s)... (UI will freeze)"
     $loadUpdatesButton.Enabled = $false
     $installButton.Enabled = $false
     $form.Refresh()
 
+    $updateSession = $null
+    $installer = $null
+    $installationResult = $null
+
     try {
-        Install-WindowsUpdate -Update $selectedUpdates -AcceptAll -IgnoreReboot -Verbose
-        $updateListView.Items.Clear()
-        $statusLabel.Text = "Installation complete."
-        [System.Windows.Forms.MessageBox]::Show("Selected updates installed. Reboot may be required.", "Success", 'OK', 'Information')
+        # Create the collection of updates to install
+        Write-Host "Creating WUA Update Collection for $($selectedUpdateCOMObjects.Count) items."
+        $updatesToInstallCollection = New-Object -ComObject "Microsoft.Update.UpdateColl" -ErrorAction Stop
+        $selectedUpdateCOMObjects | ForEach-Object { $updatesToInstallCollection.Add($_) | Out-Null }
+
+        # Create session and installer
+        Write-Host "Creating WUA Session and Installer..."
+        $updateSession = New-Object -ComObject "Microsoft.Update.Session" -ErrorAction Stop
+        $installer = $updateSession.CreateUpdateInstaller()
+        $installer.Updates = $updatesToInstallCollection
+
+        # --- Download Stage (Optional but Recommended) ---
+        $statusLabel.Text = "Downloading $($selectedUpdateCOMObjects.Count) updates... (UI will freeze)"
+        $form.Refresh()
+        Write-Host "Starting WUA Download..."
+        $downloadResult = $installer.Download()
+        Write-Host "WUA Download Result Code: $($downloadResult.ResultCode)" # 0=NotStarted, 1=InProgress, 2=Succeeded, 3=SucceededWithErrors, 4=Failed, 5=Aborted
+        if ($downloadResult.ResultCode -ne 2) { # 2 = Succeeded
+             throw "Update download failed. Result code: $($downloadResult.ResultCode)"
+        }
+        Write-Host "Downloads successful."
+
+        # --- Install Stage ---
+        $statusLabel.Text = "Installing $($selectedUpdateCOMObjects.Count) updates... (UI will freeze)"
+        $form.Refresh()
+        Write-Host "Starting WUA Install..."
+        $installationResult = $installer.Install()
+        Write-Host "WUA Installation Result Code: $($installationResult.ResultCode)" # Same codes as download
+        if ($installationResult.ResultCode -ne 2) {
+            throw "Update installation failed. Result code: $($installationResult.ResultCode)"
+        }
+
+        # Success
+        $statusLabel.Text = "Installation complete via WUA."
+        [System.Windows.Forms.MessageBox]::Show("Selected updates installed successfully using WUA.`nReboot Required: $($installationResult.RebootRequired)", "Installation Success", 'OK', 'Information')
+        $updateListView.Items.Clear() # Clear list after successful install
+
     } catch {
-        $statusLabel.Text = "Error installing updates."
-        [System.Windows.Forms.MessageBox]::Show("Failed to install updates: $_", "Error", 'OK', 'Error')
+        $statusLabel.Text = "Error during WUA install."
+        [System.Windows.Forms.MessageBox]::Show("Failed to install updates using WUA:`n`n$($_.Exception.Message)", "WUA Install Error", 'OK', 'Error')
+        # Log details if available
+        if($installationResult) { Write-Host "Last Install Result Code: $($installationResult.ResultCode). Reboot Required: $($installationResult.RebootRequired)"}
     } finally {
         $progressBar.Style = 'Blocks'
         $loadUpdatesButton.Enabled = $true
         $installButton.Enabled = $true
+        # Release COM objects
+        if ($installer) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($installer) | Out-Null }
+        if ($updateSession) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($updateSession) | Out-Null }
+        if ($updatesToInstallCollection) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($updatesToInstallCollection) | Out-Null }
+        [System.GC]::Collect()
+        [System.GC]::WaitForPendingFinalizers()
+        Write-Host "WUA Install finished. COM objects released."
         $form.Refresh()
     }
 })
 $tabUpdates.Controls.Add($installButton)
+
+
+# --- Add the Tab to the TabControl ---
+# This line should be near the end of your script where other tabs are added
+# $tabControl.TabPages.Add($tabUpdates)
+
+# --- Add the Tab to the TabControl ---
+# This line should be near the end of your script where other tabs are added
+# $tabControl.TabPages.Add($tabUpdates)
 
 # --- Add the Tab to the TabControl ---
 # Ensure this line exists after defining all controls for $tabUpdates
