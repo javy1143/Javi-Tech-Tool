@@ -55,7 +55,7 @@ $tabSystemInfo.Text = "System Info"
 $tabSystemInfo.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 
 # Add SwiftTune Logo to System Info Tab (use provided path)
-$logoPath = "https://i.ibb.co/rfcGvjRw/Swift-Tune-Logo.png"
+$logoPath = "C:\Powershell\PowershellScripts\SwiftTune\SwiftTuneLogo.png"
 if (Test-Path $logoPath) {
     $logoImage = [System.Drawing.Image]::FromFile($logoPath)
 
@@ -417,219 +417,112 @@ function Invoke-InBackground {
 }
 
 
-# ============================================
-# WINDOWS UPDATES TAB (Simplified: Security Only, Direct Execution)
-# ============================================
-
-# Ensure PSWindowsUpdate is imported globally (Place this near the top of your script)
-# --- Start Global Import Block ---
-try {
-     if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
-         Write-Host "PSWindowsUpdate module not found. Attempting installation..." -ForegroundColor Yellow
-         Install-PackageProvider -Name NuGet -Force -ErrorAction Stop
-         Install-Module -Name PSWindowsUpdate -Force -Confirm:$false -ErrorAction Stop # Added -Confirm:$false
-         Write-Host "PSWindowsUpdate module installed." -ForegroundColor Green
-     }
-     Import-Module PSWindowsUpdate -Force -ErrorAction Stop
-     Write-Host "PSWindowsUpdate imported globally."
-} catch {
-     [System.Windows.Forms.MessageBox]::Show("Failed to ensure PSWindowsUpdate module is available: `n$($_.Exception.Message)", "Module Error", 'OK', 'Error')
-     # Consider exiting or disabling update tab if module is essential
-     # exit
-}
-# --- End Global Import Block ---
-
-
-# --- Helper Function to Run Update Actions Directly (Corrected Parameter Type) ---
-function Invoke-UpdateAction {
-    param(
-        [Parameter(Mandatory=$true)]
-        [scriptblock]$Action, # The core action (Get-WindowsUpdate or Install-WindowsUpdate)
-        [Parameter(Mandatory=$true)]
-        [string]$StatusStartMessage,
-        [Parameter(Mandatory=$true)]
-        [string]$StatusSuccessMessage,
-        [Parameter(Mandatory=$true)]
-        [string]$StatusFailMessage,
-        [Parameter(Mandatory=$false)] # Optional parameter to pass to the action
-        [object]$ActionParameter
-    )
-
-    # Provide immediate feedback and disable controls
-    $statusLabel.Text = $StatusStartMessage + " (UI will freeze...)"
-    $progressBar.Style = 'Marquee'
-    # Disable buttons relevant to this tab
-    $loadSecurityButton.Enabled = $false
-    # $loadDriverButton.Enabled = $false # Removed Driver Button
-    $installButton.Enabled = $false
-    $form.Refresh() # Force UI update before potential freeze
-
-    $result = $null
-    $success = $false
-
-    try {
-        Write-Host "$(Get-Date -Format 'HH:mm:ss') - Executing action directly..."
-        # Module should already be imported globally
-
-        # Execute the provided action (scriptblock)
-        if ($PSBoundParameters.ContainsKey('ActionParameter')) {
-             $result = & $Action $ActionParameter # Pass parameter if provided
-        } else {
-             $result = & $Action # Run action without parameter
-        }
-
-        Write-Host "$(Get-Date -Format 'HH:mm:ss') - Action completed directly. Result is null/empty: $([string]::IsNullOrEmpty($result))"
-        $statusLabel.Text = $StatusSuccessMessage
-        $success = $true
-    } catch {
-        Write-Host "$(Get-Date -Format 'HH:mm:ss') - Error during direct execution: $($_.Exception.ToString())"
-        $statusLabel.Text = $StatusFailMessage
-        [System.Windows.Forms.MessageBox]::Show("An error occurred:`n`n$($_.Exception.Message)", "Operation Error", 'OK', 'Error')
-        $success = $false
-    } finally {
-        # Always re-enable controls and reset progress bar
-        $progressBar.Style = 'Blocks'
-        $loadSecurityButton.Enabled = $true
-        # $loadDriverButton.Enabled = $true # Removed Driver Button
-        $installButton.Enabled = $true
-        Write-Host "$(Get-Date -Format 'HH:mm:ss') - UI elements re-enabled."
-        $form.Refresh()
-    }
-
-    # Return results (or $null/$false on failure) bundled with success status
-    return @{ Success = $success; Data = $result }
-}
-
-
-# --- Tab Setup ---
+# WINDOWS UPDATES TAB (Fixed Load Available Updates button)
 $tabUpdates = New-Object System.Windows.Forms.TabPage
 $tabUpdates.Text = "Windows Updates"
 $tabUpdates.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 
 $updateLabel = New-Object System.Windows.Forms.Label
-$updateLabel.Text = "Check for Security/Software Updates (UI will freeze during check/install)."
+$updateLabel.Text = "Manage Windows Updates (select to install)"
 $updateLabel.Location = New-Object System.Drawing.Point(20, 10)
-$updateLabel.Size = New-Object System.Drawing.Size(940, 20) # Wider label
+$updateLabel.Size = New-Object System.Drawing.Size(940, 20)
 $updateLabel.ForeColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
 $tabUpdates.Controls.Add($updateLabel)
 
-$updateListBox = New-Object System.Windows.Forms.ListBox
-$updateListBox.Location = New-Object System.Drawing.Point(20, 40)
-$updateListBox.Size = New-Object System.Drawing.Size(940, 500)
-$updateListBox.SelectionMode = "MultiExtended"
-$updateListBox.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-$updateListBox.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
-$updateListBox.HorizontalScrollbar = $true # Add scrollbar for long titles
-$tabUpdates.Controls.Add($updateListBox)
+$updateListView = New-Object System.Windows.Forms.ListView
+$updateListView.Location = New-Object System.Drawing.Point(20, 40)
+$updateListView.Size = New-Object System.Drawing.Size(940, 500)
+$updateListView.View = 'Details'
+$updateListView.CheckBoxes = $true
+$updateListView.FullRowSelect = $true
+$updateListView.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
+$updateListView.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
+$updateListView.Columns.Add("Type", 100)
+$updateListView.Columns.Add("Title", 500)
+$updateListView.Columns.Add("KB", 100)
+$updateListView.Columns.Add("Size", 100)
+$tabUpdates.Controls.Add($updateListView)
 
-# --- Load Security Updates Button ---
-$loadSecurityButton = New-Object System.Windows.Forms.Button
-$loadSecurityButton.Text = "Load Security/Software Updates" # Updated Text
-$loadSecurityButton.Size = New-Object System.Drawing.Size(220, 30) # Wider button
-$loadSecurityButton.Location = New-Object System.Drawing.Point(20, 550)
-$loadSecurityButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$loadSecurityButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$loadSecurityButton.Add_Click({
-    $updateListBox.Items.Clear() # Clear list before loading
+$loadUpdatesButton = New-Object System.Windows.Forms.Button
+$loadUpdatesButton.Text = "Load Available Updates"
+$loadUpdatesButton.Size = New-Object System.Drawing.Size(220, 30)
+$loadUpdatesButton.Location = New-Object System.Drawing.Point(20, 550)
+$loadUpdatesButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
+$loadUpdatesButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
+$loadUpdatesButton.Add_Click({
+    $updateListView.Items.Clear()
+    $progressBar.Style = 'Marquee'
+    $statusLabel.Text = "Loading available updates..."
+    $loadUpdatesButton.Enabled = $false
+    $installButton.Enabled = $false
+    $form.Refresh()
 
-    $result = Invoke-UpdateAction `
-        -Action { Get-WindowsUpdate -Criteria "IsInstalled=0 and Type='Software' and IsHidden=0" -IgnoreUserInput -Verbose } `
-        -StatusStartMessage "Loading security/software updates..." `
-        -StatusSuccessMessage "Security/software updates loaded." `
-        -StatusFailMessage "Error loading security/software updates."
-
-    if ($result.Success -and $result.Data) {
-        $result.Data | ForEach-Object {
-            # Determine label based on categories if possible, otherwise use generic
-            $itemLabel = "Software"
-            if ($_.Categories -match 'Security Updates') { $itemLabel = "Security" }
-            $updateListBox.Items.Add("$itemLabel | $($_.Title) | $($_.KB)") | Out-Null
+    try {
+        $updates = Get-WindowsUpdate -Criteria "IsInstalled=0 and IsHidden=0" -AcceptAll -IgnoreUserInput -Verbose
+        $updateListView.BeginUpdate()
+        foreach ($update in $updates) {
+            $itemLabel = if ($update.Categories -match 'Security Updates') { "Security" } else { "Software" }
+            $size = if ($update.Size) { "$([math]::Round($update.Size / 1MB, 2)) MB" } else { "Unknown" }
+            $item = New-Object System.Windows.Forms.ListViewItem($itemLabel)
+            $item.SubItems.Add($update.Title)
+            $item.SubItems.Add($update.KB)
+            $item.SubItems.Add($size)
+            $item.Tag = $update
+            $updateListView.Items.Add($item)
         }
-         $statusLabel.Text = "Security/Software updates loaded ($($updateListBox.Items.Count) found)."
-    } elseif ($result.Success) {
-         $statusLabel.Text = "No applicable Security/Software updates found."
+        $updateListView.EndUpdate()
+        $statusLabel.Text = "Updates loaded ($($updateListView.Items.Count) found)."
+    } catch {
+        $statusLabel.Text = "Error loading updates."
+        [System.Windows.Forms.MessageBox]::Show("Failed to load updates: $_", "Error", 'OK', 'Error')
+    } finally {
+        $progressBar.Style = 'Blocks'
+        $loadUpdatesButton.Enabled = $true
+        $installButton.Enabled = $true
+        $form.Refresh()
     }
-    # Error case handled by Invoke-UpdateAction
 })
-$tabUpdates.Controls.Add($loadSecurityButton)
+$tabUpdates.Controls.Add($loadUpdatesButton)
 
-# --- Load Driver Updates Button - REMOVED ---
-# $loadDriverButton = New-Object System.Windows.Forms.Button ...
-# $tabUpdates.Controls.Add($loadDriverButton)
-
-# --- Install Selected Updates Button ---
 $installButton = New-Object System.Windows.Forms.Button
 $installButton.Text = "Install Selected Updates"
-$installButton.Size = New-Object System.Drawing.Size(180, 30)
-$installButton.Location = New-Object System.Drawing.Point(260, 550) # Adjusted position
+$installButton.Size = New-Object System.Drawing.Size(220, 30)
+$installButton.Location = New-Object System.Drawing.Point(260, 550)
 $installButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
 $installButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
 $installButton.Add_Click({
-    $selectedItems = $updateListBox.SelectedItems
-    if ($selectedItems.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Please select updates to install from the list.", "Info", 'OK', 'Information')
+    $selectedUpdates = $updateListView.CheckedItems | ForEach-Object { $_.Tag }
+    if ($selectedUpdates.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No updates selected.", "Info", 'OK', 'Information')
         return
     }
 
-    # Extract KB numbers or unique identifiers from selected items
-    $kbsToInstall = $selectedItems | ForEach-Object {
-        $parts = $_ -split '\|'
-        if ($parts.Count -ge 3) {
-             # Ensure KB is extracted correctly, removing potential surrounding whitespace
-             return $parts[2].Trim()
-        }
-        Write-Warning "Could not parse update information for: $_"
-        return $null
-    } | Where-Object { $_ -ne $null -and $_ -ne ""} | Select-Object -Unique # Added check for empty string
+    $progressBar.Style = 'Marquee'
+    $statusLabel.Text = "Installing $($selectedUpdates.Count) update(s)..."
+    $loadUpdatesButton.Enabled = $false
+    $installButton.Enabled = $false
+    $form.Refresh()
 
-     if ($kbsToInstall.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Could not identify valid KBs to install from selection.", "Error", 'OK', 'Error')
-        return
+    try {
+        Install-WindowsUpdate -Update $selectedUpdates -AcceptAll -IgnoreReboot -Verbose
+        $updateListView.Items.Clear()
+        $statusLabel.Text = "Installation complete."
+        [System.Windows.Forms.MessageBox]::Show("Selected updates installed. Reboot may be required.", "Success", 'OK', 'Information')
+    } catch {
+        $statusLabel.Text = "Error installing updates."
+        [System.Windows.Forms.MessageBox]::Show("Failed to install updates: $_", "Error", 'OK', 'Error')
+    } finally {
+        $progressBar.Style = 'Blocks'
+        $loadUpdatesButton.Enabled = $true
+        $installButton.Enabled = $true
+        $form.Refresh()
     }
-
-    # Define the action for installing updates
-    $installAction = {
-        param($KBs)
-
-        Write-Host "Attempting to install updates for KBs: $($KBs -join ', ')"
-        # Important: Get the *current* update objects matching the KBs again before installing
-        # Use criteria that matches how they were loaded
-        $allUpdates = Get-WindowsUpdate -Criteria "IsInstalled=0 and Type='Software' and IsHidden=0" -IgnoreUserInput -Verbose
-        $updatesToInstall = $allUpdates | Where-Object { $KBs -contains $_.KB }
-
-        if ($updatesToInstall) {
-             Write-Host "Found $($updatesToInstall.Count) matching update objects. Installing..."
-             # Install the filtered updates
-             Install-WindowsUpdate -Update $updatesToInstall -AcceptAll -IgnoreReboot -ErrorAction Stop
-             Write-Host "Install-WindowsUpdate command completed for selected KBs."
-             return $true # Indicate success
-        } else {
-            Write-Warning "Could not find matching installable updates for selected KBs when re-querying."
-            throw "Could not find matching installable updates for selected KBs: $($KBs -join ', ')"
-        }
-    }
-
-    # Execute the install action
-    $result = Invoke-UpdateAction `
-        -Action $installAction `
-        -ActionParameter $kbsToInstall `
-        -StatusStartMessage "Installing $($kbsToInstall.Count) update(s)..." `
-        -StatusSuccessMessage "Update installation process finished." `
-        -StatusFailMessage "Error during update installation."
-
-    if ($result.Success) {
-        [System.Windows.Forms.MessageBox]::Show("Selected updates installed. A reboot may be required.", "Installation Complete", 'OK', 'Information')
-        $updateListBox.Items.Clear() # Clear list after successful install
-        $statusLabel.Text = "Installation complete. Load updates again to check status."
-    }
-    # Error message box is handled within Invoke-UpdateAction's catch block
 })
 $tabUpdates.Controls.Add($installButton)
 
 # --- Add the Tab to the TabControl ---
-# This line should be near the end of your script where other tabs are added
-# $tabControl.TabPages.Add($tabUpdates)
-
+# Ensure this line exists after defining all controls for $tabUpdates
+# $tabControl.TabPages.Add($tabUpdates) # This should happen later when adding ALL tabs
 # ============================================
 # Finalize Tabs and Run (with color palette applied)
 # ============================================
