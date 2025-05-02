@@ -443,28 +443,36 @@ $loadSecurityButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
 $loadSecurityButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
 $loadSecurityButton.Add_Click({
     $progressBar.Style = 'Marquee'
-    $statusLabel.Text = "Loading security updates..."
-    $updateListBox.Items.Clear() # Clear list before loading
-    $global:updateResults = $null # Clear previous results
+    $statusLabel.Text = "Loading security updates (running directly)..."
+    $updateListBox.Items.Clear()
+    $form.Refresh() # Force UI update before potentially freezing
 
-    Invoke-InBackground -Script {
-        # Script runs in background job
-        Import-Module PSWindowsUpdate -Force -ErrorAction Stop # Ensure module is loaded in this session
-        # Get updates and store globally for the OnComplete handler
-        $global:updateResults = Get-WindowsUpdate -MicrosoftUpdate -Category "SecurityUpdates" -IgnoreUserInput -ErrorAction Stop
-    } -OnComplete {
-        # Runs on main thread after job success
-        if ($global:updateResults) {
-             $global:updateResults | ForEach-Object {
-                $updateListBox.Items.Add("Security | $($_.Title) | $($_.KB)") | Out-Null # Added KB for info
-            }
-             $statusLabel.Text = "Security updates loaded ($($updateListBox.Items.Count) found)."
-        } else {
-            $statusLabel.Text = "No security updates found."
-        }
+    $updates = $null # Clear previous results
+    $errorOccurred = $false
+
+    try {
+        # Ensure module is available and loaded directly
+        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
+        # Run the command directly (THIS WILL FREEZE THE UI)
+        $updates = Get-WindowsUpdate -MicrosoftUpdate -Category "SecurityUpdates" -IgnoreUserInput -ErrorAction Stop
+        $statusLabel.Text = "Security updates loaded directly ($($updates.Count) found)."
+
+    } catch {
+        $errorOccurred = $true
+        $statusLabel.Text = "Error loading security updates directly."
+        [System.Windows.Forms.MessageBox]::Show("Error loading updates directly:`n`n$($_.Exception.Message)", "Direct Load Error", 'OK', 'Error')
+    } finally {
          $progressBar.Style = 'Blocks'
-         $global:updateResults = $null # Clear global variable after use
-    } -OnError $handleUpdateError # Use shared error handler
+    }
+
+    # Populate listbox if successful
+    if (-not $errorOccurred -and $updates) {
+        $updates | ForEach-Object {
+            $updateListBox.Items.Add("Security | $($_.Title) | $($_.KB)") | Out-Null
+        }
+    } elseif (-not $errorOccurred) {
+         $statusLabel.Text = "No security updates found (direct load)."
+    }
 })
 $tabUpdates.Controls.Add($loadSecurityButton)
 
