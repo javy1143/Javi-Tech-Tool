@@ -39,10 +39,12 @@ $tabSystemInfo = New-Object System.Windows.Forms.TabPage
 $tabSystemInfo.Text = "System Info"
 $tabSystemInfo.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 
-# Add SwiftTune Logo to System Info Tab (use provided path)
-$logoPath = "C:\Powershell\PowershellScripts\SwiftTune\SwiftTuneLogo.png"
-if (Test-Path $logoPath) {
-    $logoImage = [System.Drawing.Image]::FromFile($logoPath)
+# Download SwiftTune logo from online source to temp folder
+$tempLogoPath = "$env:TEMP\SwiftTuneLogo.png"
+$logoUrl = "https://i.ibb.co/rfcGvjRw/Swift-Tune-Logo.png"
+try {
+    Invoke-WebRequest -Uri $logoUrl -OutFile $tempLogoPath -ErrorAction Stop
+    $logoImage = [System.Drawing.Image]::FromFile($tempLogoPath)
 
     $logoBox = New-Object System.Windows.Forms.PictureBox
     $logoBox.Image = $logoImage
@@ -51,6 +53,8 @@ if (Test-Path $logoPath) {
     $logoBox.Location = New-Object System.Drawing.Point(425, 10)  # Centered horizontally near top
 
     $tabSystemInfo.Controls.Add($logoBox)
+} catch {
+    Write-Host "Failed to download or load the SwiftTune logo: $_"
 }
 
 # Collect system info
