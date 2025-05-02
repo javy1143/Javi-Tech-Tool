@@ -331,131 +331,90 @@ $refreshButton.Add_Click({
 $tabStartup.Controls.Add($refreshButton)
 
 # ============================================
-# WINDOWS UPDATES TAB — FIXED WITH SYNCED UI UPDATE
+# UPDATES TAB
 # ============================================
-
-function Invoke-InBackground {
-    param (
-        [scriptblock]$Script,
-        [System.Action]$OnComplete
-    )
-    $job = Start-Job -ScriptBlock $Script
-    while ($job.State -eq 'Running') { Start-Sleep -Milliseconds 200 }
-    $result = Receive-Job $job
-    Remove-Job $job
-    if ($OnComplete) { $OnComplete.Invoke($result) }
-}
-
 $tabUpdates = New-Object System.Windows.Forms.TabPage
-$tabUpdates.Text = "Windows Updates"
+$tabUpdates.Text = "Updates"
 $tabUpdates.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 
-$updateLabel = New-Object System.Windows.Forms.Label
-$updateLabel.Text = "Select updates to install:"
-$updateLabel.Location = New-Object System.Drawing.Point(20, 10)
-$updateLabel.Size = New-Object System.Drawing.Size(500, 20)
-$updateLabel.ForeColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$tabUpdates.Controls.Add($updateLabel)
-
-$updateListBox = New-Object System.Windows.Forms.ListBox
-$updateListBox.Location = New-Object System.Drawing.Point(20, 40)
-$updateListBox.Size = New-Object System.Drawing.Size(940, 500)
-$updateListBox.SelectionMode = "MultiExtended"
-$updateListBox.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-$updateListBox.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
-$tabUpdates.Controls.Add($updateListBox)
-
-$loadSecurityButton = New-Object System.Windows.Forms.Button
-$loadSecurityButton.Text = "Load Security Updates"
-$loadSecurityButton.Size = New-Object System.Drawing.Size(180, 30)
-$loadSecurityButton.Location = New-Object System.Drawing.Point(20, 550)
-$loadSecurityButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$loadSecurityButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$loadSecurityButton.Add_Click({
-    $progressBar.Style = 'Marquee'
-    $statusLabel.Text = "Loading security updates..."
-    Invoke-InBackground {
+# Ensure PSWindowsUpdate Module Helper
+function Ensure-PSWindowsUpdate {
+    try {
         if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
             Install-PackageProvider -Name NuGet -Force -ErrorAction Stop
             Install-Module -Name PSWindowsUpdate -Force -ErrorAction Stop
         }
         Import-Module PSWindowsUpdate -Force -ErrorAction Stop
-        Get-WindowsUpdate -MicrosoftUpdate -Category "SecurityUpdates" -IgnoreUserInput
-    } {
-        param ($results)
-        $updateListBox.Items.Clear()
-        $results | ForEach-Object {
-            $updateListBox.Items.Add("Security | $($_.Title)") | Out-Null
-        }
-        $statusLabel.Text = "Security updates loaded."
-        $progressBar.Style = 'Blocks'
+        return $true
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Failed to install or import PSWindowsUpdate:`n$_", "Error", 'OK', 'Error')
+        return $false
     }
-})
-$tabUpdates.Controls.Add($loadSecurityButton)
+}
 
-$loadDriverButton = New-Object System.Windows.Forms.Button
-$loadDriverButton.Text = "Load Driver Updates"
-$loadDriverButton.Size = New-Object System.Drawing.Size(180, 30)
-$loadDriverButton.Location = New-Object System.Drawing.Point(220, 550)
-$loadDriverButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$loadDriverButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$loadDriverButton.Add_Click({
-    $progressBar.Style = 'Marquee'
-    $statusLabel.Text = "Loading driver updates..."
-    Invoke-InBackground {
-        if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
-            Install-PackageProvider -Name NuGet -Force -ErrorAction Stop
-            Install-Module -Name PSWindowsUpdate -Force -ErrorAction Stop
-        }
-        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
-        Get-WindowsUpdate -MicrosoftUpdate -Category "Drivers" -IgnoreUserInput
-    } {
-        param ($results)
-        $updateListBox.Items.Clear()
-        $results | ForEach-Object {
-            $updateListBox.Items.Add("Driver | $($_.Title)") | Out-Null
-        }
-        $statusLabel.Text = "Driver updates loaded."
-        $progressBar.Style = 'Blocks'
-    }
-})
-$tabUpdates.Controls.Add($loadDriverButton)
+# Status Label
+$updateStatusLabel = New-Object System.Windows.Forms.Label
+$updateStatusLabel.Text = "Status: Ready"
+$updateStatusLabel.ForeColor = [System.Drawing.Color]::White
+$updateStatusLabel.Location = New-Object System.Drawing.Point(20, 300)
+$updateStatusLabel.Size = New-Object System.Drawing.Size(800, 30)
+$tabUpdates.Controls.Add($updateStatusLabel)
 
-$installButton = New-Object System.Windows.Forms.Button
-$installButton.Text = "Install Selected Updates"
-$installButton.Size = New-Object System.Drawing.Size(180, 30)
-$installButton.Location = New-Object System.Drawing.Point(420, 550)
-$installButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$installButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$installButton.Add_Click({
-    $selected = $updateListBox.SelectedItems
-    if ($selected.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Please select updates to install.", "Info", 'OK', 'Information')
-        return
-    }
-    $progressBar.Style = 'Marquee'
-    $statusLabel.Text = "Installing selected updates..."
-    Invoke-InBackground {
-        if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
-            Install-PackageProvider -Name NuGet -Force -ErrorAction Stop
-            Install-Module -Name PSWindowsUpdate -Force -ErrorAction Stop
-        }
-        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
-        $allUpdates = Get-WindowsUpdate -MicrosoftUpdate -IgnoreUserInput
-        foreach ($item in $using:selected) {
-            $title = ($item -split '\|')[1].Trim()
-            $match = $allUpdates | Where-Object { $_.Title -eq $title }
-            if ($match) {
-                $match | Install-WindowsUpdate -AcceptAll -IgnoreReboot
+# Load Security Updates Button
+$btnSecurityUpdates = New-Object System.Windows.Forms.Button
+$btnSecurityUpdates.Text = "Load Security Updates"
+$btnSecurityUpdates.Size = New-Object System.Drawing.Size(200, 40)
+$btnSecurityUpdates.Location = New-Object System.Drawing.Point(20, 30)
+$btnSecurityUpdates.Add_Click({
+    $updateStatusLabel.Text = "Status: Checking security updates..."
+    if (Ensure-PSWindowsUpdate) {
+        try {
+            $securityUpdates = Get-WindowsUpdate -MicrosoftUpdate -Category 'SecurityUpdates' -ErrorAction Stop
+            if ($securityUpdates) {
+                $msg = "Security updates found:`n" + ($securityUpdates | Select-Object -ExpandProperty Title -Unique -join "`n")
+                [System.Windows.Forms.MessageBox]::Show($msg, "Security Updates", 'OK', 'Information')
+                $updateStatusLabel.Text = "Status: Security updates loaded."
+            } else {
+                [System.Windows.Forms.MessageBox]::Show("No security updates available.", "Info", 'OK', 'Information')
+                $updateStatusLabel.Text = "Status: No security updates found."
             }
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Error fetching security updates:`n$_", "Error", 'OK', 'Error')
+            $updateStatusLabel.Text = "Status: Failed to load security updates."
         }
-    } {
-        $statusLabel.Text = "Selected updates installed."
-        [System.Windows.Forms.MessageBox]::Show("Selected updates installed (reboot if needed).", "Success", 'OK', 'Information')
-        $progressBar.Style = 'Blocks'
     }
 })
-$tabUpdates.Controls.Add($installButton)
+$tabUpdates.Controls.Add($btnSecurityUpdates)
+
+# Load Driver Updates Button
+$btnDriverUpdates = New-Object System.Windows.Forms.Button
+$btnDriverUpdates.Text = "Load Driver Updates"
+$btnDriverUpdates.Size = New-Object System.Drawing.Size(200, 40)
+$btnDriverUpdates.Location = New-Object System.Drawing.Point(20, 90)
+$btnDriverUpdates.Add_Click({
+    $updateStatusLabel.Text = "Status: Checking driver updates..."
+    if (Ensure-PSWindowsUpdate) {
+        try {
+            $driverUpdates = Get-WindowsUpdate -MicrosoftUpdate -Category 'Drivers' -ErrorAction Stop
+            if ($driverUpdates) {
+                $msg = "Driver updates found:`n" + ($driverUpdates | Select-Object -ExpandProperty Title -Unique -join "`n")
+                [System.Windows.Forms.MessageBox]::Show($msg, "Driver Updates", 'OK', 'Information')
+                $updateStatusLabel.Text = "Status: Driver updates loaded."
+            } else {
+                [System.Windows.Forms.MessageBox]::Show("No driver updates available.", "Info", 'OK', 'Information')
+                $updateStatusLabel.Text = "Status: No driver updates found."
+            }
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Error fetching driver updates:`n$_", "Error", 'OK', 'Error')
+            $updateStatusLabel.Text = "Status: Failed to load driver updates."
+        }
+    }
+})
+$tabUpdates.Controls.Add($btnDriverUpdates)
+
+# Add tab to tab control
+$tabControl.TabPages.Add($tabUpdates)
+
 
 # ============================================
 # Finalize Tabs and Run (with color palette applied)
