@@ -1,6 +1,21 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# Ensure PSWindowsUpdate is present and import it globally
+try {
+     if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
+         Write-Host "PSWindowsUpdate module not found. Please install it manually or restore Ensure-PSWindowsUpdate function." -ForegroundColor Yellow
+         # Optionally add install logic back here if desired
+         throw "PSWindowsUpdate module missing."
+     }
+     Import-Module PSWindowsUpdate -Force -ErrorAction Stop
+     Write-Host "PSWindowsUpdate imported globally."
+} catch {
+     [System.Windows.Forms.MessageBox]::Show("Failed to import PSWindowsUpdate globally: $_", "Module Error", 'OK', 'Error')
+     # Consider exiting the script if the module is essential and fails to load
+     # exit
+}
+
 # ============================================
 # Define Helper: Ensure PSWindowsUpdate Module
 # ============================================
@@ -455,7 +470,6 @@ function Invoke-UpdateAction {
     try {
         Write-Host "$(Get-Date -Format 'HH:mm:ss') - Importing PSWindowsUpdate..."
         # Ensure module is imported in the current scope
-        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
         Write-Host "$(Get-Date -Format 'HH:mm:ss') - Executing action directly..."
 
         # Execute the provided action (scriptblock)
@@ -499,7 +513,7 @@ $loadSecurityButton.Add_Click({
     $updateListBox.Items.Clear() # Clear list before loading
 
     $result = Invoke-UpdateAction `
-        -Action { Get-WindowsUpdate -Category "SecurityUpdates" -IgnoreUserInput } `
+        -Action { Get-WindowsUpdate -Category "SecurityUpdates" -IgnoreUserInput -Verbose } `
         -StatusStartMessage "Loading security updates..." `
         -StatusSuccessMessage "Security updates loaded." `
         -StatusFailMessage "Error loading security updates."
@@ -526,7 +540,7 @@ $loadDriverButton.Add_Click({
     $updateListBox.Items.Clear() # Clear list before loading
 
      $result = Invoke-UpdateAction `
-        -Action { Get-WindowsUpdate -Category "Drivers" -IgnoreUserInput } `
+        -Action { Get-WindowsUpdate -Category "Drivers" -IgnoreUserInput -Verbose } `
         -StatusStartMessage "Loading driver updates..." `
         -StatusSuccessMessage "Driver updates loaded." `
         -StatusFailMessage "Error loading driver updates."
