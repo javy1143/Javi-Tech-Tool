@@ -39,12 +39,10 @@ $tabSystemInfo = New-Object System.Windows.Forms.TabPage
 $tabSystemInfo.Text = "System Info"
 $tabSystemInfo.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 
-# Download SwiftTune logo from online source to temp folder
-$tempLogoPath = "$env:TEMP\SwiftTuneLogo.png"
-$logoUrl = "https://i.ibb.co/rfcGvjRw/Swift-Tune-Logo.png"
-try {
-    Invoke-WebRequest -Uri $logoUrl -OutFile $tempLogoPath -ErrorAction Stop
-    $logoImage = [System.Drawing.Image]::FromFile($tempLogoPath)
+# Add SwiftTune Logo to System Info Tab (use provided path)
+$logoPath = "C:\Powershell\PowershellScripts\SwiftTune\SwiftTuneLogo.png"
+if (Test-Path $logoPath) {
+    $logoImage = [System.Drawing.Image]::FromFile($logoPath)
 
     $logoBox = New-Object System.Windows.Forms.PictureBox
     $logoBox.Image = $logoImage
@@ -53,8 +51,6 @@ try {
     $logoBox.Location = New-Object System.Drawing.Point(425, 10)  # Centered horizontally near top
 
     $tabSystemInfo.Controls.Add($logoBox)
-} catch {
-    Write-Host "Failed to download or load the SwiftTune logo: $_"
 }
 
 # Collect system info
@@ -335,8 +331,21 @@ $refreshButton.Add_Click({
 $tabStartup.Controls.Add($refreshButton)
 
 # ============================================
-# WINDOWS UPDATES TAB (with color palette)
+# WINDOWS UPDATES TAB — FIXED MODULE CHECK PER JOB
 # ============================================
+
+function Invoke-InBackground {
+    param (
+        [scriptblock]$Script,
+        [System.Action]$OnComplete
+    )
+    $job = Start-Job -ScriptBlock $Script
+    while ($job.State -eq 'Running') { Start-Sleep -Milliseconds 200 }
+    Receive-Job $job | Out-Null
+    Remove-Job $job
+    if ($OnComplete) { $OnComplete.Invoke() }
+}
+
 $tabUpdates = New-Object System.Windows.Forms.TabPage
 $tabUpdates.Text = "Windows Updates"
 $tabUpdates.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
@@ -346,7 +355,6 @@ $updateLabel.Text = "Select updates to install:"
 $updateLabel.Location = New-Object System.Drawing.Point(20, 10)
 $updateLabel.Size = New-Object System.Drawing.Size(500, 20)
 $updateLabel.ForeColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$updateLabel.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 $tabUpdates.Controls.Add($updateLabel)
 
 $updateListBox = New-Object System.Windows.Forms.ListBox
@@ -366,16 +374,20 @@ $loadSecurityButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
 $loadSecurityButton.Add_Click({
     $progressBar.Style = 'Marquee'
     $statusLabel.Text = "Loading security updates..."
-    $form.Refresh()
-    try {
-        Ensure-PSWindowsUpdate
+    Invoke-InBackground {
+        if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
+            Install-PackageProvider -Name NuGet -Force -ErrorAction Stop
+            Install-Module -Name PSWindowsUpdate -Force -ErrorAction Stop
+        }
+        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
+        $updates = Get-WindowsUpdate -MicrosoftUpdate -Category "SecurityUpdates" -IgnoreUserInput
+        $global:updateResults = $updates
+    } {
         $updateListBox.Items.Clear()
-        $updateListBox.Items.Add("Security Update Example") | Out-Null
+        $global:updateResults | ForEach-Object {
+            $updateListBox.Items.Add("Security | $($_.Title)") | Out-Null
+        }
         $statusLabel.Text = "Security updates loaded."
-    } catch {
-        $statusLabel.Text = "Error loading security updates."
-        [System.Windows.Forms.MessageBox]::Show("Failed: $_", "Error", 'OK', 'Error')
-    } finally {
         $progressBar.Style = 'Blocks'
     }
 })
@@ -390,19 +402,20 @@ $loadDriverButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
 $loadDriverButton.Add_Click({
     $progressBar.Style = 'Marquee'
     $statusLabel.Text = "Loading driver updates..."
-    $form.Refresh()
-    try {
-        Ensure-PSWindowsUpdate
-        $updateListBox.Items.Clear()
+    Invoke-InBackground {
+        if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
+            Install-PackageProvider -Name NuGet -Force -ErrorAction Stop
+            Install-Module -Name PSWindowsUpdate -Force -ErrorAction Stop
+        }
+        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
         $updates = Get-WindowsUpdate -MicrosoftUpdate -Category "Drivers" -IgnoreUserInput
-        $updates | ForEach-Object {
+        $global:updateResults = $updates
+    } {
+        $updateListBox.Items.Clear()
+        $global:updateResults | ForEach-Object {
             $updateListBox.Items.Add("Driver | $($_.Title)") | Out-Null
         }
         $statusLabel.Text = "Driver updates loaded."
-    } catch {
-        $statusLabel.Text = "Error loading driver updates."
-        [System.Windows.Forms.MessageBox]::Show("Failed: $_", "Error", 'OK', 'Error')
-    } finally {
         $progressBar.Style = 'Blocks'
     }
 })
@@ -415,35 +428,37 @@ $installButton.Location = New-Object System.Drawing.Point(420, 550)
 $installButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
 $installButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
 $installButton.Add_Click({
+    $selected = $updateListBox.SelectedItems
+    if ($selected.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Please select updates to install.", "Info", 'OK', 'Information')
+        return
+    }
     $progressBar.Style = 'Marquee'
     $statusLabel.Text = "Installing selected updates..."
-    $form.Refresh()
-    try {
-        Ensure-PSWindowsUpdate
-        $selected = $updateListBox.SelectedItems
-        if ($selected.Count -eq 0) {
-            $statusLabel.Text = "No updates selected."
-            [System.Windows.Forms.MessageBox]::Show("Please select updates to install.", "Info", 'OK', 'Information')
-            return
+    Invoke-InBackground {
+        if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
+            Install-PackageProvider -Name NuGet -Force -ErrorAction Stop
+            Install-Module -Name PSWindowsUpdate -Force -ErrorAction Stop
         }
+        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
         $allUpdates = Get-WindowsUpdate -MicrosoftUpdate -IgnoreUserInput
-        foreach ($item in $selected) {
+        foreach ($item in $using:selected) {
             $title = ($item -split '\|')[1].Trim()
             $match = $allUpdates | Where-Object { $_.Title -eq $title }
             if ($match) {
                 $match | Install-WindowsUpdate -AcceptAll -IgnoreReboot
             }
         }
+    } {
         $statusLabel.Text = "Selected updates installed."
         [System.Windows.Forms.MessageBox]::Show("Selected updates installed (reboot if needed).", "Success", 'OK', 'Information')
-    } catch {
-        $statusLabel.Text = "Error installing updates."
-        [System.Windows.Forms.MessageBox]::Show("Failed to install updates: $_", "Error", 'OK', 'Error')
-    } finally {
         $progressBar.Style = 'Blocks'
     }
 })
 $tabUpdates.Controls.Add($installButton)
+
+
+
 
 # ============================================
 # Finalize Tabs and Run (with color palette applied)
@@ -479,3 +494,4 @@ $tabControl.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 $form.Controls.Add($tabControl)
 $form.Add_Shown({ $form.Activate() })
 [System.Windows.Forms.Application]::Run($form)
+
