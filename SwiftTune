@@ -418,34 +418,33 @@ function Invoke-InBackground {
 
 
 # ============================================
-# WINDOWS UPDATES TAB (Direct Execution - UI WILL FREEZE TEMPORARILY)
+# WINDOWS UPDATES TAB (Simplified: Security Only, Direct Execution)
 # ============================================
 
-$tabUpdates = New-Object System.Windows.Forms.TabPage
-$tabUpdates.Text = "Windows Updates"
-$tabUpdates.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
+# Ensure PSWindowsUpdate is imported globally (Place this near the top of your script)
+# --- Start Global Import Block ---
+try {
+     if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
+         Write-Host "PSWindowsUpdate module not found. Attempting installation..." -ForegroundColor Yellow
+         Install-PackageProvider -Name NuGet -Force -ErrorAction Stop
+         Install-Module -Name PSWindowsUpdate -Force -Confirm:$false -ErrorAction Stop # Added -Confirm:$false
+         Write-Host "PSWindowsUpdate module installed." -ForegroundColor Green
+     }
+     Import-Module PSWindowsUpdate -Force -ErrorAction Stop
+     Write-Host "PSWindowsUpdate imported globally."
+} catch {
+     [System.Windows.Forms.MessageBox]::Show("Failed to ensure PSWindowsUpdate module is available: `n$($_.Exception.Message)", "Module Error", 'OK', 'Error')
+     # Consider exiting or disabling update tab if module is essential
+     # exit
+}
+# --- End Global Import Block ---
 
-$updateLabel = New-Object System.Windows.Forms.Label
-$updateLabel.Text = "Select updates to install (requires PSWindowsUpdate module): UI will freeze during check/install."
-$updateLabel.Location = New-Object System.Drawing.Point(20, 10)
-$updateLabel.Size = New-Object System.Drawing.Size(940, 20) # Wider label
-$updateLabel.ForeColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$tabUpdates.Controls.Add($updateLabel)
-
-$updateListBox = New-Object System.Windows.Forms.ListBox
-$updateListBox.Location = New-Object System.Drawing.Point(20, 40)
-$updateListBox.Size = New-Object System.Drawing.Size(940, 500)
-$updateListBox.SelectionMode = "MultiExtended"
-$updateListBox.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-$updateListBox.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
-$updateListBox.HorizontalScrollbar = $true # Add scrollbar for long titles
-$tabUpdates.Controls.Add($updateListBox)
 
 # --- Helper Function to Run Update Actions Directly (Corrected Parameter Type) ---
 function Invoke-UpdateAction {
     param(
         [Parameter(Mandatory=$true)]
-        [scriptblock]$Action, # CORRECTED TYPE: The core action (Get-WindowsUpdate or Install-WindowsUpdate)
+        [scriptblock]$Action, # The core action (Get-WindowsUpdate or Install-WindowsUpdate)
         [Parameter(Mandatory=$true)]
         [string]$StatusStartMessage,
         [Parameter(Mandatory=$true)]
@@ -459,8 +458,9 @@ function Invoke-UpdateAction {
     # Provide immediate feedback and disable controls
     $statusLabel.Text = $StatusStartMessage + " (UI will freeze...)"
     $progressBar.Style = 'Marquee'
+    # Disable buttons relevant to this tab
     $loadSecurityButton.Enabled = $false
-    $loadDriverButton.Enabled = $false
+    # $loadDriverButton.Enabled = $false # Removed Driver Button
     $installButton.Enabled = $false
     $form.Refresh() # Force UI update before potential freeze
 
@@ -468,12 +468,10 @@ function Invoke-UpdateAction {
     $success = $false
 
     try {
-        Write-Host "$(Get-Date -Format 'HH:mm:ss') - Importing PSWindowsUpdate..."
-        # Ensure module is imported in the current scope
         Write-Host "$(Get-Date -Format 'HH:mm:ss') - Executing action directly..."
+        # Module should already be imported globally
 
         # Execute the provided action (scriptblock)
-        # The call operator '&' works correctly with scriptblocks
         if ($PSBoundParameters.ContainsKey('ActionParameter')) {
              $result = & $Action $ActionParameter # Pass parameter if provided
         } else {
@@ -492,7 +490,7 @@ function Invoke-UpdateAction {
         # Always re-enable controls and reset progress bar
         $progressBar.Style = 'Blocks'
         $loadSecurityButton.Enabled = $true
-        $loadDriverButton.Enabled = $true
+        # $loadDriverButton.Enabled = $true # Removed Driver Button
         $installButton.Enabled = $true
         Write-Host "$(Get-Date -Format 'HH:mm:ss') - UI elements re-enabled."
         $form.Refresh()
@@ -502,10 +500,32 @@ function Invoke-UpdateAction {
     return @{ Success = $success; Data = $result }
 }
 
+
+# --- Tab Setup ---
+$tabUpdates = New-Object System.Windows.Forms.TabPage
+$tabUpdates.Text = "Windows Updates"
+$tabUpdates.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
+
+$updateLabel = New-Object System.Windows.Forms.Label
+$updateLabel.Text = "Check for Security/Software Updates (UI will freeze during check/install)."
+$updateLabel.Location = New-Object System.Drawing.Point(20, 10)
+$updateLabel.Size = New-Object System.Drawing.Size(940, 20) # Wider label
+$updateLabel.ForeColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
+$tabUpdates.Controls.Add($updateLabel)
+
+$updateListBox = New-Object System.Windows.Forms.ListBox
+$updateListBox.Location = New-Object System.Drawing.Point(20, 40)
+$updateListBox.Size = New-Object System.Drawing.Size(940, 500)
+$updateListBox.SelectionMode = "MultiExtended"
+$updateListBox.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
+$updateListBox.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
+$updateListBox.HorizontalScrollbar = $true # Add scrollbar for long titles
+$tabUpdates.Controls.Add($updateListBox)
+
 # --- Load Security Updates Button ---
 $loadSecurityButton = New-Object System.Windows.Forms.Button
-$loadSecurityButton.Text = "Load Security Updates"
-$loadSecurityButton.Size = New-Object System.Drawing.Size(180, 30)
+$loadSecurityButton.Text = "Load Security/Software Updates" # Updated Text
+$loadSecurityButton.Size = New-Object System.Drawing.Size(220, 30) # Wider button
 $loadSecurityButton.Location = New-Object System.Drawing.Point(20, 550)
 $loadSecurityButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
 $loadSecurityButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
@@ -514,69 +534,34 @@ $loadSecurityButton.Add_Click({
 
     $result = Invoke-UpdateAction `
         -Action { Get-WindowsUpdate -Criteria "IsInstalled=0 and Type='Software' and IsHidden=0" -IgnoreUserInput -Verbose } `
-        -StatusStartMessage "Loading security updates..." `
-        -StatusSuccessMessage "Security updates loaded." `
-        -StatusFailMessage "Error loading security updates."
+        -StatusStartMessage "Loading security/software updates..." `
+        -StatusSuccessMessage "Security/software updates loaded." `
+        -StatusFailMessage "Error loading security/software updates."
 
     if ($result.Success -and $result.Data) {
         $result.Data | ForEach-Object {
-            $updateListBox.Items.Add("Security | $($_.Title) | $($_.KB)") | Out-Null
+            # Determine label based on categories if possible, otherwise use generic
+            $itemLabel = "Software"
+            if ($_.Categories -match 'Security Updates') { $itemLabel = "Security" }
+            $updateListBox.Items.Add("$itemLabel | $($_.Title) | $($_.KB)") | Out-Null
         }
-         $statusLabel.Text = "Security updates loaded ($($updateListBox.Items.Count) found)."
+         $statusLabel.Text = "Security/Software updates loaded ($($updateListBox.Items.Count) found)."
     } elseif ($result.Success) {
-         $statusLabel.Text = "No security updates found."
+         $statusLabel.Text = "No applicable Security/Software updates found."
     }
+    # Error case handled by Invoke-UpdateAction
 })
 $tabUpdates.Controls.Add($loadSecurityButton)
 
-# --- Load Driver Updates Button ---
-$loadDriverButton = New-Object System.Windows.Forms.Button
-$loadDriverButton.Text = "Load Driver Updates"
-$loadDriverButton.Size = New-Object System.Drawing.Size(180, 30)
-$loadDriverButton.Location = New-Object System.Drawing.Point(220, 550)
-$loadDriverButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$loadDriverButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$loadDriverButton.Add_Click({
-    $updateListBox.Items.Clear() # Clear list before loading
-
-     $result = Invoke-UpdateAction `
-        -Action { Get-WindowsUpdate -Criteria "IsInstalled=0 and IsHidden=0" -IgnoreUserInput -Verbose } `
-        -StatusStartMessage "Loading driver updates..." `
-        -StatusSuccessMessage "Driver updates loaded." `
-        -StatusFailMessage "Error loading driver updates."
-
-    # --- Filter results AFTER Invoke-UpdateAction for Drivers ---
-if ($result.Success -and $result.Data) {
-    # Filter the results for items that are likely drivers
-    # Drivers often have 'Driver' in CategoryNames or specific providers
-    # Note: This filtering might need refinement based on actual data properties
-    $driverUpdates = $result.Data | Where-Object {
-        ($_.Categories -match 'Drivers') -or ($_.Title -match 'Driver')
-        # Add other potential driver indicators if needed
-    }
-
-    if ($driverUpdates) {
-        $driverUpdates | ForEach-Object {
-            $updateListBox.Items.Add("Driver | $($_.Title) | $($_.KB)") | Out-Null
-        }
-        <span class="math-inline">statusLabel\.Text \= "Driver updates loaded \(</span>($updateListBox.Items.Count) found)."
-    } else {
-         $statusLabel.Text = "No specific Driver updates found in the results."
-         $updateListBox.Items.Add("--- (No items matched Driver filter) ---") | Out-Null
-    }
-} elseif ($result.Success) {
-     $statusLabel.Text = "No applicable updates found (broad criteria)."
-}
-# Error case is handled by Invoke-UpdateAction
-# --- End of modified result handling ---
-})
-$tabUpdates.Controls.Add($loadDriverButton)
+# --- Load Driver Updates Button - REMOVED ---
+# $loadDriverButton = New-Object System.Windows.Forms.Button ...
+# $tabUpdates.Controls.Add($loadDriverButton)
 
 # --- Install Selected Updates Button ---
 $installButton = New-Object System.Windows.Forms.Button
 $installButton.Text = "Install Selected Updates"
 $installButton.Size = New-Object System.Drawing.Size(180, 30)
-$installButton.Location = New-Object System.Drawing.Point(420, 550)
+$installButton.Location = New-Object System.Drawing.Point(260, 550) # Adjusted position
 $installButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
 $installButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
 $installButton.Add_Click({
@@ -590,14 +575,15 @@ $installButton.Add_Click({
     $kbsToInstall = $selectedItems | ForEach-Object {
         $parts = $_ -split '\|'
         if ($parts.Count -ge 3) {
-             return $parts[2].Trim() # Assuming KB is the unique part
+             # Ensure KB is extracted correctly, removing potential surrounding whitespace
+             return $parts[2].Trim()
         }
         Write-Warning "Could not parse update information for: $_"
         return $null
-    } | Where-Object { $_ -ne $null } | Select-Object -Unique
+    } | Where-Object { $_ -ne $null -and $_ -ne ""} | Select-Object -Unique # Added check for empty string
 
      if ($kbsToInstall.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Could not identify valid updates to install from selection.", "Error", 'OK', 'Error')
+        [System.Windows.Forms.MessageBox]::Show("Could not identify valid KBs to install from selection.", "Error", 'OK', 'Error')
         return
     }
 
@@ -607,20 +593,18 @@ $installButton.Add_Click({
 
         Write-Host "Attempting to install updates for KBs: $($KBs -join ', ')"
         # Important: Get the *current* update objects matching the KBs again before installing
-        $allUpdates = Get-WindowsUpdate -IgnoreUserInput # Get all available non-installed updates
+        # Use criteria that matches how they were loaded
+        $allUpdates = Get-WindowsUpdate -Criteria "IsInstalled=0 and Type='Software' and IsHidden=0" -IgnoreUserInput -Verbose
         $updatesToInstall = $allUpdates | Where-Object { $KBs -contains $_.KB }
 
         if ($updatesToInstall) {
              Write-Host "Found $($updatesToInstall.Count) matching update objects. Installing..."
              # Install the filtered updates
-             # NOTE: Consider adding -Confirm:$false if you don't want any potential prompts
              Install-WindowsUpdate -Update $updatesToInstall -AcceptAll -IgnoreReboot -ErrorAction Stop
              Write-Host "Install-WindowsUpdate command completed for selected KBs."
-             # Return $true or some status if needed, though not strictly necessary here
-             return $true
+             return $true # Indicate success
         } else {
             Write-Warning "Could not find matching installable updates for selected KBs when re-querying."
-            # Throw an error to be caught by Invoke-UpdateAction
             throw "Could not find matching installable updates for selected KBs: $($KBs -join ', ')"
         }
     }
@@ -635,8 +619,7 @@ $installButton.Add_Click({
 
     if ($result.Success) {
         [System.Windows.Forms.MessageBox]::Show("Selected updates installed. A reboot may be required.", "Installation Complete", 'OK', 'Information')
-        # Optional: Refresh list or clear selection after install
-        $updateListBox.Items.Clear()
+        $updateListBox.Items.Clear() # Clear list after successful install
         $statusLabel.Text = "Installation complete. Load updates again to check status."
     }
     # Error message box is handled within Invoke-UpdateAction's catch block
@@ -644,8 +627,9 @@ $installButton.Add_Click({
 $tabUpdates.Controls.Add($installButton)
 
 # --- Add the Tab to the TabControl ---
-# Ensure this line exists after defining all controls for $tabUpdates
-# $tabControl.TabPages.Add($tabUpdates) # This should happen later when adding ALL tabs
+# This line should be near the end of your script where other tabs are added
+# $tabControl.TabPages.Add($tabUpdates)
+
 # ============================================
 # Finalize Tabs and Run (with color palette applied)
 # ============================================
