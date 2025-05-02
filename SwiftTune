@@ -403,12 +403,15 @@ function Invoke-InBackground {
 
 
 # ============================================
-# WINDOWS UPDATES TAB (Using BackgroundWorker)
+# WINDOWS UPDATES TAB (Using PowerShell.BeginInvoke and Timer)
 # ============================================
 
 $tabUpdates = New-Object System.Windows.Forms.TabPage
 $tabUpdates.Text = "Windows Updates"
 $tabUpdates.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
+
+# Store async operation state (PowerShell instance and AsyncResult)
+$script:currentUpdateJob = $null
 
 $updateLabel = New-Object System.Windows.Forms.Label
 $updateLabel.Text = "Select updates to install (requires PSWindowsUpdate module):"
@@ -426,77 +429,118 @@ $updateListBox.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
 $updateListBox.HorizontalScrollbar = $true # Add scrollbar for long titles
 $tabUpdates.Controls.Add($updateListBox)
 
-# --- BackgroundWorker Setup ---
-$updateLoaderWorker = New-Object System.ComponentModel.BackgroundWorker
-$updateLoaderWorker.WorkerReportsProgress = $false # We'll just update at the end
-$updateLoaderWorker.WorkerSupportsCancellation = $false # Keep it simple
+# --- Timer to check async operation status ---
+$checkJobTimer = New-Object System.Windows.Forms.Timer
+$checkJobTimer.Interval = 500 # Check every 500 milliseconds
 
-# --- DoWork Event (Runs on Background Thread) ---
-$updateLoaderWorker.add_DoWork({
-    param($sender, $e)
-
-    # Argument passed is the category ("SecurityUpdates" or "Drivers")
-    $category = $e.Argument
-    $results = @{ Success = $false; Data = $null; Error = $null }
-
-    try {
-        # Ensure module is available and imported in this thread's session state
-        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
-
-        # Get the updates
-        $updateData = Get-WindowsUpdate -MicrosoftUpdate -Category $category -IgnoreUserInput -ErrorAction Stop
-        $results.Success = $true
-        $results.Data = $updateData # Pass the data back
-    } catch {
-        $results.Success = $false
-        $results.Error = $_ # Pass the error back
+$checkJobTimer.add_Tick({
+    # This runs on the UI thread
+    if ($script:currentUpdateJob -eq $null) {
+        $checkJobTimer.Stop()
+        return
     }
-    # Set the result for the RunWorkerCompleted event
-    $e.Result = $results
-})
 
-# --- RunWorkerCompleted Event (Runs on UI Thread) ---
-$updateLoaderWorker.add_RunWorkerCompleted({
-    param($sender, $e)
+    $psInstance = $script:currentUpdateJob.PowerShellInstance
+    $asyncResult = $script:currentUpdateJob.AsyncResult
+    $categoryLabel = $script:currentUpdateJob.CategoryLabel # Get context
 
-    # Check results from the DoWork event
-    if ($e.Error -ne $null) {
-        # Error during the background operation itself (unexpected)
-        [System.Windows.Forms.MessageBox]::Show("An unexpected error occurred in BackgroundWorker: $($e.Error.Message)", "Worker Error", 'OK', 'Error')
-        $statusLabel.Text = "Error during background operation."
-    } elseif ($e.Cancelled) {
-        # Handle cancellation if it were enabled
-        $statusLabel.Text = "Update loading cancelled."
-    } else {
-        # Operation finished, check the result data we passed back
-        $operationResult = $e.Result
-        if ($operationResult.Success) {
-            # Success, populate the list box
+    if ($asyncResult.IsCompleted) {
+        $checkJobTimer.Stop() # Stop timer once completed
+        Write-Host "Async operation completed."
+
+        $updateData = $null
+        $hadError = $false
+
+        try {
+            # EndInvoke retrieves results and throws errors if any occurred in the script
+            $updateData = $psInstance.EndInvoke($asyncResult)
+            Write-Host "EndInvoke successful. Items retrieved: $($updateData.Count)"
+        } catch {
+            $hadError = $true
+            Write-Host "Error during EndInvoke: $($_.Exception.Message)"
+            [System.Windows.Forms.MessageBox]::Show("Error loading updates:`n`n$($_.Exception.Message)", "Update Error", 'OK', 'Error')
+            $statusLabel.Text = "Error loading $categoryLabel updates."
+        } finally {
+            # Clean up the PowerShell instance and dispose of resources
+            $psInstance.Dispose()
+            $script:currentUpdateJob = $null # Clear the job state
+            $progressBar.Style = 'Blocks'
+            # Re-enable buttons
+            $loadSecurityButton.Enabled = $true
+            $loadDriverButton.Enabled = $true
+            $installButton.Enabled = $true
+        }
+
+        # Populate list box if successful
+        if (-not $hadError) {
             $updateListBox.Items.Clear()
-            $updateData = $operationResult.Data
-            $categoryLabel = if ($operationResult.Data.CategoryNames -match "Security") { "Security" } else { "Driver" }
-
             if ($updateData) {
-                 $updateData | ForEach-Object {
-                     $updateListBox.Items.Add("$categoryLabel | $($_.Title) | $($_.KB)") | Out-Null
-                 }
-                 $statusLabel.Text = "$categoryLabel updates loaded ($($updateListBox.Items.Count) found)."
+                $updateData | ForEach-Object {
+                    $updateListBox.Items.Add("$categoryLabel | $($_.Title) | $($_.KB)") | Out-Null
+                }
+                $statusLabel.Text = "$categoryLabel updates loaded ($($updateListBox.Items.Count) found)."
             } else {
                  $statusLabel.Text = "No $categoryLabel updates found."
             }
-        } else {
-            # An error occurred within our try/catch in DoWork
-             [System.Windows.Forms.MessageBox]::Show("Error loading updates:`n`n$($operationResult.Error.Exception.Message)", "Update Error", 'OK', 'Error')
-             $statusLabel.Text = "Error loading updates."
         }
+    } else {
+        # Still running, update status or just wait
+         Write-Host "Async operation still running..."
     }
-    # Reset UI elements
-    $progressBar.Style = 'Blocks'
-    # Re-enable buttons if they were disabled
-    $loadSecurityButton.Enabled = $true
-    $loadDriverButton.Enabled = $true
-    $installButton.Enabled = $true
 })
+
+# --- Function to Start Async Update Check ---
+function Start-UpdateCheck {
+    param(
+        [string]$Category, # "SecurityUpdates" or "Drivers"
+        [string]$CategoryLabel # "Security" or "Driver"
+    )
+
+    if ($script:currentUpdateJob -ne $null) {
+        [System.Windows.Forms.MessageBox]::Show("An update check is already in progress.", "Busy", 'OK', 'Warning')
+        return
+    }
+
+    $updateListBox.Items.Clear()
+    $progressBar.Style = 'Marquee'
+    $statusLabel.Text = "Loading $CategoryLabel updates..."
+    # Disable buttons
+    $loadSecurityButton.Enabled = $false
+    $loadDriverButton.Enabled = $false
+    $installButton.Enabled = $false
+
+    # Create PowerShell instance
+    $psInstance = [powershell]::Create()
+
+    # Define the script to run in the background runspace
+    $scriptBlock = {
+        param($UpdateCategory) # Parameter for the script block
+
+        # Import the module within this runspace
+        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
+
+        # Execute the command
+        $updates = Get-WindowsUpdate -MicrosoftUpdate -Category $UpdateCategory -IgnoreUserInput -ErrorAction Stop
+
+        # Return the results
+        return $updates
+    }
+    $psInstance.AddScript($scriptBlock).AddArgument($Category) | Out-Null
+
+    # Start the asynchronous invocation
+    Write-Host "Starting BeginInvoke for category: $Category"
+    $asyncResult = $psInstance.BeginInvoke()
+
+    # Store state for the timer to check
+    $script:currentUpdateJob = @{
+        PowerShellInstance = $psInstance
+        AsyncResult        = $asyncResult
+        CategoryLabel      = $CategoryLabel # Store context for UI update
+    }
+
+    # Start the timer to monitor completion
+    $checkJobTimer.Start()
+}
 
 # --- Load Security Updates Button ---
 $loadSecurityButton = New-Object System.Windows.Forms.Button
@@ -505,19 +549,7 @@ $loadSecurityButton.Size = New-Object System.Drawing.Size(180, 30)
 $loadSecurityButton.Location = New-Object System.Drawing.Point(20, 550)
 $loadSecurityButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
 $loadSecurityButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$loadSecurityButton.Add_Click({
-    if (-not $updateLoaderWorker.IsBusy) {
-        $updateListBox.Items.Clear() # Clear list before loading
-        $progressBar.Style = 'Marquee'
-        $statusLabel.Text = "Loading security updates..."
-        # Disable buttons to prevent multiple clicks
-        $loadSecurityButton.Enabled = $false
-        $loadDriverButton.Enabled = $false
-        $installButton.Enabled = $false
-        # Start the background worker, passing the category
-        $updateLoaderWorker.RunWorkerAsync("SecurityUpdates")
-    }
-})
+$loadSecurityButton.Add_Click({ Start-UpdateCheck -Category "SecurityUpdates" -CategoryLabel "Security" })
 $tabUpdates.Controls.Add($loadSecurityButton)
 
 # --- Load Driver Updates Button ---
@@ -527,25 +559,11 @@ $loadDriverButton.Size = New-Object System.Drawing.Size(180, 30)
 $loadDriverButton.Location = New-Object System.Drawing.Point(220, 550)
 $loadDriverButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
 $loadDriverButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$loadDriverButton.Add_Click({
-     if (-not $updateLoaderWorker.IsBusy) {
-        $updateListBox.Items.Clear() # Clear list before loading
-        $progressBar.Style = 'Marquee'
-        $statusLabel.Text = "Loading driver updates..."
-         # Disable buttons to prevent multiple clicks
-        $loadSecurityButton.Enabled = $false
-        $loadDriverButton.Enabled = $false
-        $installButton.Enabled = $false
-        # Start the background worker, passing the category
-        $updateLoaderWorker.RunWorkerAsync("Drivers")
-    }
-})
+$loadDriverButton.Add_Click({ Start-UpdateCheck -Category "Drivers" -CategoryLabel "Driver" })
 $tabUpdates.Controls.Add($loadDriverButton)
 
-# --- Install Selected Updates Button (Needs similar BackgroundWorker logic) ---
-# TODO: Implement BackgroundWorker for the install process as well.
-# For now, leaving the old Start-Job logic - this might still hang or fail.
-# You would create a separate BackgroundWorker for installation or modify the existing one.
+# --- Install Selected Updates Button ---
+# TODO: Implement install process using the same BeginInvoke/Timer pattern
 $installButton = New-Object System.Windows.Forms.Button
 $installButton.Text = "Install Selected Updates"
 $installButton.Size = New-Object System.Drawing.Size(180, 30)
@@ -560,23 +578,16 @@ $installButton.Add_Click({
         return
     }
 
-    # >>> Placeholder for BackgroundWorker implementation for Install <<<
-    # For now, just showing a message. Replace this with BackgroundWorker.
-    [System.Windows.Forms.MessageBox]::Show("Install process needs to be converted to BackgroundWorker. Currently disabled.", "Notice", 'OK', 'Information')
+    # >>> Placeholder for BeginInvoke implementation for Install <<<
+    [System.Windows.Forms.MessageBox]::Show("Install process needs to be converted to use PowerShell's BeginInvoke method. Currently disabled.", "Notice", 'OK', 'Information')
     return
 
-    # Old Start-Job logic (likely problematic):
-    # $progressBar.Style = 'Marquee'
-    # $statusLabel.Text = "Installing selected updates..."
-    # Invoke-InBackground { ... } { ... } # Replace this block
 })
 $tabUpdates.Controls.Add($installButton)
-
 
 # --- Add the Tab to the TabControl ---
 # Ensure this line exists after defining all controls for $tabUpdates
 # $tabControl.TabPages.Add($tabUpdates) # This should happen later when adding ALL tabs
-
 
 # ============================================
 # Finalize Tabs and Run (with color palette applied)
@@ -612,4 +623,3 @@ $tabControl.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 $form.Controls.Add($tabControl)
 $form.Add_Shown({ $form.Activate() })
 [System.Windows.Forms.Application]::Run($form)
-
