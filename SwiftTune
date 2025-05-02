@@ -331,7 +331,7 @@ $refreshButton.Add_Click({
 $tabStartup.Controls.Add($refreshButton)
 
 # ============================================
-# WINDOWS UPDATES TAB — FIXED MODULE CHECK PER JOB
+# WINDOWS UPDATES TAB — FIXED WITH SYNCED UI UPDATE
 # ============================================
 
 function Invoke-InBackground {
@@ -341,9 +341,9 @@ function Invoke-InBackground {
     )
     $job = Start-Job -ScriptBlock $Script
     while ($job.State -eq 'Running') { Start-Sleep -Milliseconds 200 }
-    Receive-Job $job | Out-Null
+    $result = Receive-Job $job
     Remove-Job $job
-    if ($OnComplete) { $OnComplete.Invoke() }
+    if ($OnComplete) { $OnComplete.Invoke($result) }
 }
 
 $tabUpdates = New-Object System.Windows.Forms.TabPage
@@ -380,11 +380,11 @@ $loadSecurityButton.Add_Click({
             Install-Module -Name PSWindowsUpdate -Force -ErrorAction Stop
         }
         Import-Module PSWindowsUpdate -Force -ErrorAction Stop
-        $updates = Get-WindowsUpdate -MicrosoftUpdate -Category "SecurityUpdates" -IgnoreUserInput
-        $global:updateResults = $updates
+        Get-WindowsUpdate -MicrosoftUpdate -Category "SecurityUpdates" -IgnoreUserInput
     } {
+        param ($results)
         $updateListBox.Items.Clear()
-        $global:updateResults | ForEach-Object {
+        $results | ForEach-Object {
             $updateListBox.Items.Add("Security | $($_.Title)") | Out-Null
         }
         $statusLabel.Text = "Security updates loaded."
@@ -408,11 +408,11 @@ $loadDriverButton.Add_Click({
             Install-Module -Name PSWindowsUpdate -Force -ErrorAction Stop
         }
         Import-Module PSWindowsUpdate -Force -ErrorAction Stop
-        $updates = Get-WindowsUpdate -MicrosoftUpdate -Category "Drivers" -IgnoreUserInput
-        $global:updateResults = $updates
+        Get-WindowsUpdate -MicrosoftUpdate -Category "Drivers" -IgnoreUserInput
     } {
+        param ($results)
         $updateListBox.Items.Clear()
-        $global:updateResults | ForEach-Object {
+        $results | ForEach-Object {
             $updateListBox.Items.Add("Driver | $($_.Title)") | Out-Null
         }
         $statusLabel.Text = "Driver updates loaded."
@@ -456,9 +456,6 @@ $installButton.Add_Click({
     }
 })
 $tabUpdates.Controls.Add($installButton)
-
-
-
 
 # ============================================
 # Finalize Tabs and Run (with color palette applied)
