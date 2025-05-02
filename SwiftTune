@@ -403,18 +403,15 @@ function Invoke-InBackground {
 
 
 # ============================================
-# WINDOWS UPDATES TAB (Using PowerShell.BeginInvoke and Timer)
+# WINDOWS UPDATES TAB (Direct Execution - UI WILL FREEZE TEMPORARILY)
 # ============================================
 
 $tabUpdates = New-Object System.Windows.Forms.TabPage
 $tabUpdates.Text = "Windows Updates"
 $tabUpdates.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 
-# Store async operation state (PowerShell instance and AsyncResult)
-$script:currentUpdateJob = $null
-
 $updateLabel = New-Object System.Windows.Forms.Label
-$updateLabel.Text = "Select updates to install (requires PSWindowsUpdate module):"
+$updateLabel.Text = "Select updates to install (requires PSWindowsUpdate module): UI will freeze during check/install."
 $updateLabel.Location = New-Object System.Drawing.Point(20, 10)
 $updateLabel.Size = New-Object System.Drawing.Size(940, 20) # Wider label
 $updateLabel.ForeColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
@@ -429,184 +426,65 @@ $updateListBox.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
 $updateListBox.HorizontalScrollbar = $true # Add scrollbar for long titles
 $tabUpdates.Controls.Add($updateListBox)
 
-# --- Timer to check async operation status ---
-$checkJobTimer = New-Object System.Windows.Forms.Timer
-$checkJobTimer.Interval = 500 # Check every 500 milliseconds
-
-$checkJobTimer.add_Tick({
-    # This runs on the UI thread
-    if ($script:currentUpdateJob -eq $null) {
-        $checkJobTimer.Stop()
-        return
-    }
-
-    $psInstance = $script:currentUpdateJob.PowerShellInstance
-    $asyncResult = $script:currentUpdateJob.AsyncResult
-    $categoryLabel = $script:currentUpdateJob.CategoryLabel # Get context
-
-    if ($asyncResult.IsCompleted) {
-        $checkJobTimer.Stop() # Stop timer once completed
-        Write-Host "$(Get-Date -Format 'HH:mm:ss') - Async operation completed."
-
-        $streamErrors = @()
-        $streamWarnings = @()
-        # --- Explicitly Check Streams BEFORE EndInvoke ---
-        if ($psInstance.Streams.Error.Count -gt 0) {
-            Write-Host "$(Get-Date -Format 'HH:mm:ss') - Errors found in PowerShell streams BEFORE EndInvoke:"
-            $streamErrors = $psInstance.Streams.Error | ForEach-Object { Write-Host "STREAM ERROR: $_"; $_.ToString() }
-        }
-         if ($psInstance.Streams.Warning.Count -gt 0) {
-            Write-Host "$(Get-Date -Format 'HH:mm:ss') - Warnings found in PowerShell streams:"
-            $streamWarnings = $psInstance.Streams.Warning | ForEach-Object { Write-Host "STREAM WARNING: $_"; $_.ToString() }
-        }
-        # You could add checks for .Verbose and .Debug here too if needed.
-        # --- End Stream Check ---
-
-        $updateData = $null
-        $hadTerminatingError = $false
-        $terminatingErrorMessage = ""
-
-        try {
-            Write-Host "$(Get-Date -Format 'HH:mm:ss') - Calling EndInvoke..."
-            # EndInvoke retrieves results and throws terminating errors
-            $updateData = $psInstance.EndInvoke($asyncResult)
-            Write-Host "$(Get-Date -Format 'HH:mm:ss') - EndInvoke called. Data type: $($updateData.GetType().FullName). IsNullOrEmpty: $([string]::IsNullOrEmpty($updateData))"
-            if ($updateData) { # Checks for null or empty collection
-                 Write-Host "Item count retrieved via EndInvoke: $($updateData.Count)"
-            } else {
-                 Write-Host "No data (null or empty) returned from EndInvoke."
-            }
-        } catch {
-            $hadTerminatingError = $true
-            $terminatingErrorMessage = $_.Exception.ToString() # Get full exception details
-            Write-Host "$(Get-Date -Format 'HH:mm:ss') - Terminating Error during EndInvoke: $terminatingErrorMessage"
-            # Display terminating error immediately
-            [System.Windows.Forms.MessageBox]::Show("An error occurred loading updates:`n`n$terminatingErrorMessage", "Update Error", 'OK', 'Error')
-            $statusLabel.Text = "Error loading $categoryLabel updates."
-        } finally {
-            # Clean up the PowerShell instance and dispose of resources
-            $psInstance.Dispose()
-            $script:currentUpdateJob = $null # Clear the job state
-            # Only reset progress/buttons if no terminating error occurred OR if stream errors/warnings were the only issue found later
-            if (-not $hadTerminatingError) {
-                 $progressBar.Style = 'Blocks'
-            }
-             # Re-enable buttons regardless of non-terminating errors, but maybe not on terminating ones? Decided to always re-enable.
-            $loadSecurityButton.Enabled = $true
-            $loadDriverButton.Enabled = $true
-            $installButton.Enabled = $true
-             Write-Host "$(Get-Date -Format 'HH:mm:ss') - Cleanup finished."
-        }
-
-        # --- Process results/errors AFTER EndInvoke and cleanup ---
-        if ($hadTerminatingError) {
-            # Error already displayed, status set. Do nothing more.
-             Write-Host "$(Get-Date -Format 'HH:mm:ss') - Skipping UI update due to terminating error."
-        } elseif ($streamErrors.Count -gt 0) {
-            # Handle non-terminating errors found in streams
-             $statusLabel.Text = "Error loading $categoryLabel updates (see console/log)."
-             [System.Windows.Forms.MessageBox]::Show("Non-terminating errors occurred loading updates (check console output):`n`n$($streamErrors -join [System.Environment]::NewLine)", "Update Warning/Error", 'OK', 'Warning')
-             Write-Host "$(Get-Date -Format 'HH:mm:ss') - Displayed stream errors."
-             $updateListBox.Items.Clear() # Clear listbox on stream errors
-        } elseif ($updateData) {
-            # Success and we have data
-            Write-Host "$(Get-Date -Format 'HH:mm:ss') - Populating listbox..."
-            $updateListBox.Items.Clear()
-            $updateData | ForEach-Object {
-                if ($_.PSObject.Properties['Title'] -and $_.PSObject.Properties['KB']) {
-                   $updateListBox.Items.Add("$categoryLabel | $($_.Title) | $($_.KB)") | Out-Null
-                } else {
-                   Write-Host "Warning: Received unexpected object type: $($_.GetType().FullName)"
-                }
-            }
-            $statusLabel.Text = "$categoryLabel updates loaded ($($updateListBox.Items.Count) found)."
-             Write-Host "$(Get-Date -Format 'HH:mm:ss') - Listbox populated."
-        } else {
-            # Success, but no data returned (null or empty collection)
-            Write-Host "$(Get-Date -Format 'HH:mm:ss') - No updates found for category '$categoryLabel'."
-            $updateListBox.Items.Clear()
-            $statusLabel.Text = "No $categoryLabel updates found."
-             # Optionally, display stream warnings if they occurred but no errors/data
-             if ($streamWarnings.Count -gt 0) {
-                  [System.Windows.Forms.MessageBox]::Show("No updates found, but warnings occurred (check console output):`n`n$($streamWarnings -join [System.Environment]::NewLine)", "Update Warning", 'OK', 'Warning')
-             }
-        }
-    }
-    # No 'else' needed for IsCompleted - timer just ticks again
-})
-
-# --- Function to Start Async Update Check ---
-function Start-UpdateCheck {
+# --- Helper Function to Run Update Actions Directly ---
+function Invoke-UpdateAction {
     param(
-        [string]$Category, # "SecurityUpdates" or "Drivers"
-        [string]$CategoryLabel # "Security" or "Driver"
+        [Parameter(Mandatory=$true)]
+        [Action]$Action, # The core action (Get-WindowsUpdate or Install-WindowsUpdate)
+        [Parameter(Mandatory=$true)]
+        [string]$StatusStartMessage,
+        [Parameter(Mandatory=$true)]
+        [string]$StatusSuccessMessage,
+        [Parameter(Mandatory=$true)]
+        [string]$StatusFailMessage,
+        [Parameter(Mandatory=$false)] # Optional parameter to pass to the action
+        [object]$ActionParameter
     )
 
-    if ($script:currentUpdateJob -ne $null) {
-        [System.Windows.Forms.MessageBox]::Show("An update check is already in progress.", "Busy", 'OK', 'Warning')
-        return
-    }
-
-    $updateListBox.Items.Clear()
+    # Provide immediate feedback and disable controls
+    $statusLabel.Text = $StatusStartMessage + " (UI will freeze...)"
     $progressBar.Style = 'Marquee'
-    $statusLabel.Text = "Loading $CategoryLabel updates..."
-    # Disable buttons
     $loadSecurityButton.Enabled = $false
     $loadDriverButton.Enabled = $false
     $installButton.Enabled = $false
+    $form.Refresh() # Force UI update before potential freeze
 
-    # Create PowerShell instance
-    $psInstance = [powershell]::Create()
-
-    # Define the script to run in the background runspace
-    $scriptBlock = {
-    # Parameter is no longer needed as we removed -Category for testing
-    # param($UpdateCategory)
-
-    # Define log file path (can reuse function if defined globally or redefine here)
-    $logPath = Join-Path $env:TEMP "SwiftTuneUpdateLog_BG.txt"
-    Function Write-BGLog($message) {
-        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        "[$timestamp] [BGThread] $message" | Out-File -FilePath $logPath -Append -Encoding UTF8
-    }
-    Clear-Content -Path $logPath -ErrorAction SilentlyContinue # Clear log for this run
-    Write-BGLog "Background script started."
-
-    $updates = $null # Initialize updates variable
+    $result = $null
+    $success = $false
 
     try {
-        Write-BGLog "Attempting to import PSWindowsUpdate module..."
+        Write-Host "$(Get-Date -Format 'HH:mm:ss') - Importing PSWindowsUpdate..."
+        # Ensure module is imported in the current scope
         Import-Module PSWindowsUpdate -Force -ErrorAction Stop
-        Write-BGLog "PSWindowsUpdate module imported."
+        Write-Host "$(Get-Date -Format 'HH:mm:ss') - Executing action directly..."
 
-        Write-BGLog "Checking WUA service status..."
-        $svc = Get-Service wuauserv -ErrorAction SilentlyContinue
-        if ($svc) {
-            Write-BGLog "WUA Service Status: $($svc.Status)"
+        # Execute the provided action
+        if ($PSBoundParameters.ContainsKey('ActionParameter')) {
+             $result = & $Action $ActionParameter # Pass parameter if provided
         } else {
-            Write-BGLog "WUA Service (wuauserv) not found or cannot be queried."
+             $result = & $Action # Run action without parameter
         }
 
-        # --- TEST: Removed -Category and -MicrosoftUpdate ---
-        Write-BGLog "Attempting simplest Get-WindowsUpdate -IgnoreUserInput..."
-        # Run the command and explicitly assign to $updates
-        $updates = Get-WindowsUpdate -IgnoreUserInput -ErrorAction Stop
-        Write-BGLog "Simplest Get-WindowsUpdate command finished. Result IsNullOrEmpty: $([string]::IsNullOrEmpty($updates)). Count (if not null): $($updates.Count)"
-
+        Write-Host "$(Get-Date -Format 'HH:mm:ss') - Action completed directly. Result is null/empty: $([string]::IsNullOrEmpty($result))"
+        $statusLabel.Text = $StatusSuccessMessage
+        $success = $true
     } catch {
-         Write-BGLog "ERROR in background script: $($_.Exception.ToString())"
-         # Ensure $updates is null or empty on error if not already set
-         $updates = $null
+        Write-Host "$(Get-Date -Format 'HH:mm:ss') - Error during direct execution: $($_.Exception.ToString())"
+        $statusLabel.Text = $StatusFailMessage
+        [System.Windows.Forms.MessageBox]::Show("An error occurred:`n`n$($_.Exception.Message)", "Operation Error", 'OK', 'Error')
+        $success = $false
     } finally {
-         Write-BGLog "Background script finished."
+        # Always re-enable controls and reset progress bar
+        $progressBar.Style = 'Blocks'
+        $loadSecurityButton.Enabled = $true
+        $loadDriverButton.Enabled = $true
+        $installButton.Enabled = $true
+        Write-Host "$(Get-Date -Format 'HH:mm:ss') - UI elements re-enabled."
+        $form.Refresh()
     }
 
-    # Return the results
-    return $updates
-}
-
-    # Start the timer to monitor completion
-    $checkJobTimer.Start()
+    # Return results (or $null/$false on failure) bundled with success status
+    return @{ Success = $success; Data = $result }
 }
 
 # --- Load Security Updates Button ---
@@ -616,7 +494,24 @@ $loadSecurityButton.Size = New-Object System.Drawing.Size(180, 30)
 $loadSecurityButton.Location = New-Object System.Drawing.Point(20, 550)
 $loadSecurityButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
 $loadSecurityButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$loadSecurityButton.Add_Click({ Start-UpdateCheck -Category "SecurityUpdates" -CategoryLabel "Security" })
+$loadSecurityButton.Add_Click({
+    $updateListBox.Items.Clear() # Clear list before loading
+
+    $result = Invoke-UpdateAction `
+        -Action { Get-WindowsUpdate -Category "SecurityUpdates" -IgnoreUserInput } `
+        -StatusStartMessage "Loading security updates..." `
+        -StatusSuccessMessage "Security updates loaded." `
+        -StatusFailMessage "Error loading security updates."
+
+    if ($result.Success -and $result.Data) {
+        $result.Data | ForEach-Object {
+            $updateListBox.Items.Add("Security | $($_.Title) | $($_.KB)") | Out-Null
+        }
+         $statusLabel.Text = "Security updates loaded ($($updateListBox.Items.Count) found)."
+    } elseif ($result.Success) {
+         $statusLabel.Text = "No security updates found."
+    }
+})
 $tabUpdates.Controls.Add($loadSecurityButton)
 
 # --- Load Driver Updates Button ---
@@ -626,11 +521,27 @@ $loadDriverButton.Size = New-Object System.Drawing.Size(180, 30)
 $loadDriverButton.Location = New-Object System.Drawing.Point(220, 550)
 $loadDriverButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
 $loadDriverButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$loadDriverButton.Add_Click({ Start-UpdateCheck -Category "Drivers" -CategoryLabel "Driver" })
+$loadDriverButton.Add_Click({
+    $updateListBox.Items.Clear() # Clear list before loading
+
+     $result = Invoke-UpdateAction `
+        -Action { Get-WindowsUpdate -Category "Drivers" -IgnoreUserInput } `
+        -StatusStartMessage "Loading driver updates..." `
+        -StatusSuccessMessage "Driver updates loaded." `
+        -StatusFailMessage "Error loading driver updates."
+
+    if ($result.Success -and $result.Data) {
+        $result.Data | ForEach-Object {
+            $updateListBox.Items.Add("Driver | $($_.Title) | $($_.KB)") | Out-Null
+        }
+         $statusLabel.Text = "Driver updates loaded ($($updateListBox.Items.Count) found)."
+    } elseif ($result.Success) {
+         $statusLabel.Text = "No driver updates found."
+    }
+})
 $tabUpdates.Controls.Add($loadDriverButton)
 
 # --- Install Selected Updates Button ---
-# TODO: Implement install process using the same BeginInvoke/Timer pattern
 $installButton = New-Object System.Windows.Forms.Button
 $installButton.Text = "Install Selected Updates"
 $installButton.Size = New-Object System.Drawing.Size(180, 30)
@@ -638,24 +549,72 @@ $installButton.Location = New-Object System.Drawing.Point(420, 550)
 $installButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
 $installButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
 $installButton.Add_Click({
-    # Existing logic to get selected items...
-    $selected = $updateListBox.SelectedItems
-    if ($selected.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Please select updates to install.", "Info", 'OK', 'Information')
+    $selectedItems = $updateListBox.SelectedItems
+    if ($selectedItems.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Please select updates to install from the list.", "Info", 'OK', 'Information')
         return
     }
 
-    # >>> Placeholder for BeginInvoke implementation for Install <<<
-    [System.Windows.Forms.MessageBox]::Show("Install process needs to be converted to use PowerShell's BeginInvoke method. Currently disabled.", "Notice", 'OK', 'Information')
-    return
+    # Extract KB numbers or unique identifiers from selected items
+    $kbsToInstall = $selectedItems | ForEach-Object {
+        $parts = $_ -split '\|'
+        if ($parts.Count -ge 3) {
+             return $parts[2].Trim() # Assuming KB is the unique part
+        }
+        Write-Warning "Could not parse update information for: $_"
+        return $null
+    } | Where-Object { $_ -ne $null } | Select-Object -Unique
 
+     if ($kbsToInstall.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Could not identify valid updates to install from selection.", "Error", 'OK', 'Error')
+        return
+    }
+
+    # Define the action for installing updates
+    $installAction = {
+        param($KBs)
+
+        Write-Host "Attempting to install updates for KBs: $($KBs -join ', ')"
+        # Important: Get the *current* update objects matching the KBs again before installing
+        $allUpdates = Get-WindowsUpdate -IgnoreUserInput # Get all available non-installed updates
+        $updatesToInstall = $allUpdates | Where-Object { $KBs -contains $_.KB }
+
+        if ($updatesToInstall) {
+             Write-Host "Found $($updatesToInstall.Count) matching update objects. Installing..."
+             # Install the filtered updates
+             # NOTE: Consider adding -Confirm:$false if you don't want any potential prompts
+             Install-WindowsUpdate -Update $updatesToInstall -AcceptAll -IgnoreReboot -ErrorAction Stop
+             Write-Host "Install-WindowsUpdate command completed for selected KBs."
+             # Return $true or some status if needed, though not strictly necessary here
+             return $true
+        } else {
+            Write-Warning "Could not find matching installable updates for selected KBs when re-querying."
+            # Throw an error to be caught by Invoke-UpdateAction
+            throw "Could not find matching installable updates for selected KBs: $($KBs -join ', ')"
+        }
+    }
+
+    # Execute the install action
+    $result = Invoke-UpdateAction `
+        -Action $installAction `
+        -ActionParameter $kbsToInstall `
+        -StatusStartMessage "Installing $($kbsToInstall.Count) update(s)..." `
+        -StatusSuccessMessage "Update installation process finished." `
+        -StatusFailMessage "Error during update installation."
+
+    if ($result.Success) {
+        [System.Windows.Forms.MessageBox]::Show("Selected updates installed. A reboot may be required.", "Installation Complete", 'OK', 'Information')
+        # Optional: Refresh list or clear selection after install
+        $updateListBox.Items.Clear()
+        $statusLabel.Text = "Installation complete. Load updates again to check status."
+    }
+    # Error message box is handled within Invoke-UpdateAction's catch block
 })
 $tabUpdates.Controls.Add($installButton)
 
 # --- Add the Tab to the TabControl ---
 # Ensure this line exists after defining all controls for $tabUpdates
 # $tabControl.TabPages.Add($tabUpdates) # This should happen later when adding ALL tabs
-
 # ============================================
 # Finalize Tabs and Run (with color palette applied)
 # ============================================
