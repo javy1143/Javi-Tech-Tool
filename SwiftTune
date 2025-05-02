@@ -426,11 +426,11 @@ $updateListBox.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
 $updateListBox.HorizontalScrollbar = $true # Add scrollbar for long titles
 $tabUpdates.Controls.Add($updateListBox)
 
-# --- Helper Function to Run Update Actions Directly ---
+# --- Helper Function to Run Update Actions Directly (Corrected Parameter Type) ---
 function Invoke-UpdateAction {
     param(
         [Parameter(Mandatory=$true)]
-        [Action]$Action, # The core action (Get-WindowsUpdate or Install-WindowsUpdate)
+        [scriptblock]$Action, # CORRECTED TYPE: The core action (Get-WindowsUpdate or Install-WindowsUpdate)
         [Parameter(Mandatory=$true)]
         [string]$StatusStartMessage,
         [Parameter(Mandatory=$true)]
@@ -458,7 +458,8 @@ function Invoke-UpdateAction {
         Import-Module PSWindowsUpdate -Force -ErrorAction Stop
         Write-Host "$(Get-Date -Format 'HH:mm:ss') - Executing action directly..."
 
-        # Execute the provided action
+        # Execute the provided action (scriptblock)
+        # The call operator '&' works correctly with scriptblocks
         if ($PSBoundParameters.ContainsKey('ActionParameter')) {
              $result = & $Action $ActionParameter # Pass parameter if provided
         } else {
