@@ -513,7 +513,7 @@ $loadSecurityButton.Add_Click({
     $updateListBox.Items.Clear() # Clear list before loading
 
     $result = Invoke-UpdateAction `
-        -Action { Get-WindowsUpdate -Category "SecurityUpdates" -IgnoreUserInput -Verbose } `
+        -Action { Get-WindowsUpdate -Criteria "IsInstalled=0 and Type='Software' and IsHidden=0" -IgnoreUserInput -Verbose } `
         -StatusStartMessage "Loading security updates..." `
         -StatusSuccessMessage "Security updates loaded." `
         -StatusFailMessage "Error loading security updates."
@@ -540,7 +540,7 @@ $loadDriverButton.Add_Click({
     $updateListBox.Items.Clear() # Clear list before loading
 
      $result = Invoke-UpdateAction `
-        -Action { Get-WindowsUpdate -Category "Drivers" -IgnoreUserInput -Verbose } `
+        -Action { Get-WindowsUpdate -Criteria "IsInstalled=0 and Type='Driver' and IsHidden=0" -IgnoreUserInput -Verbose } `
         -StatusStartMessage "Loading driver updates..." `
         -StatusSuccessMessage "Driver updates loaded." `
         -StatusFailMessage "Error loading driver updates."
