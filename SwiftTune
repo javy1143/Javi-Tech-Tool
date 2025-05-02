@@ -540,19 +540,35 @@ $loadDriverButton.Add_Click({
     $updateListBox.Items.Clear() # Clear list before loading
 
      $result = Invoke-UpdateAction `
-        -Action { Get-WindowsUpdate -Criteria "IsInstalled=0 and Type='Driver' and IsHidden=0" -IgnoreUserInput -Verbose } `
+        -Action { Get-WindowsUpdate -Criteria "IsInstalled=0 and IsHidden=0" -IgnoreUserInput -Verbose } `
         -StatusStartMessage "Loading driver updates..." `
         -StatusSuccessMessage "Driver updates loaded." `
         -StatusFailMessage "Error loading driver updates."
 
-    if ($result.Success -and $result.Data) {
-        $result.Data | ForEach-Object {
+    # --- Filter results AFTER Invoke-UpdateAction for Drivers ---
+if ($result.Success -and $result.Data) {
+    # Filter the results for items that are likely drivers
+    # Drivers often have 'Driver' in CategoryNames or specific providers
+    # Note: This filtering might need refinement based on actual data properties
+    $driverUpdates = $result.Data | Where-Object {
+        ($_.Categories -match 'Drivers') -or ($_.Title -match 'Driver')
+        # Add other potential driver indicators if needed
+    }
+
+    if ($driverUpdates) {
+        $driverUpdates | ForEach-Object {
             $updateListBox.Items.Add("Driver | $($_.Title) | $($_.KB)") | Out-Null
         }
-         $statusLabel.Text = "Driver updates loaded ($($updateListBox.Items.Count) found)."
-    } elseif ($result.Success) {
-         $statusLabel.Text = "No driver updates found."
+        <span class="math-inline">statusLabel\.Text \= "Driver updates loaded \(</span>($updateListBox.Items.Count) found)."
+    } else {
+         $statusLabel.Text = "No specific Driver updates found in the results."
+         $updateListBox.Items.Add("--- (No items matched Driver filter) ---") | Out-Null
     }
+} elseif ($result.Success) {
+     $statusLabel.Text = "No applicable updates found (broad criteria)."
+}
+# Error case is handled by Invoke-UpdateAction
+# --- End of modified result handling ---
 })
 $tabUpdates.Controls.Add($loadDriverButton)
 
