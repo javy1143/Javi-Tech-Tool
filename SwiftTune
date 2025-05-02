@@ -55,7 +55,7 @@ $tabSystemInfo.Text = "System Info"
 $tabSystemInfo.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 
 # Add SwiftTune Logo to System Info Tab (use provided path)
-$logoPath = "C:\Powershell\PowershellScripts\SwiftTune\SwiftTuneLogo.png"
+$logoPath = "https://i.ibb.co/rfcGvjRw/Swift-Tune-Logo.png"
 if (Test-Path $logoPath) {
     $logoImage = [System.Drawing.Image]::FromFile($logoPath)
 
