@@ -20,19 +20,93 @@ try {
 # Define Helper: Ensure PSWindowsUpdate Module
 # ============================================
 function Ensure-PSWindowsUpdate {
-    if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
-        Write-Host "Installing PSWindowsUpdate module..."
-        try {
-            Install-PackageProvider -Name NuGet -Force -ErrorAction Stop
-            Install-Module -Name PSWindowsUpdate -Force -ErrorAction Stop
-            Import-Module PSWindowsUpdate -Force -ErrorAction Stop
-        } catch {
-            [System.Windows.Forms.MessageBox]::Show("Failed to install PSWindowsUpdate: $_", "Error", 'OK', 'Error')
-            throw $_
+    # Check if the module is already loaded in the current session, if not, check if it's available
+    # Using "Get-Module -Name" first to see if it's already imported in the current session.
+    # If not, then "Get-Module -ListAvailable" to see if it's installed but not imported.
+    if (-not (Get-Module -Name PSWindowsUpdate -ErrorAction SilentlyContinue)) {
+        if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
+            Write-Host "PSWindowsUpdate module not found installed. Attempting automatic installation..." -ForegroundColor Yellow
+            try {
+                # Ensure NuGet Package Provider is installed. -Force handles if it's already there or prompts.
+                # -Confirm:$false attempts to bypass interactive prompts.
+                Write-Host "Checking/Installing NuGet package provider..." -ForegroundColor Cyan
+                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Confirm:$false -ErrorAction Stop
+
+                # Install the module from PSGallery
+                Write-Host "Installing PSWindowsUpdate module from PSGallery..." -ForegroundColor Cyan
+                # -Force will install even if a previous version exists.
+                # -Confirm:$false attempts to bypass interactive prompts.
+                # For a system tool, installing for AllUsers (default when run as admin) is common.
+                Install-Module -Name PSWindowsUpdate -Force -Confirm:$false -ErrorAction Stop
+
+                Write-Host "PSWindowsUpdate module installed successfully." -ForegroundColor Green
+
+            } catch {
+                $errorMessage = "Failed during PSWindowsUpdate installation: $($_.Exception.Message)"
+                Write-Host $errorMessage -ForegroundColor Red
+                # Display error in a message box as it's a GUI script
+                [System.Windows.Forms.MessageBox]::Show($errorMessage, "Module Installation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+                throw # Re-throw to be caught by the calling try/catch, which will exit.
+            }
         }
-    } else {
-        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
     }
+
+    # --- Attempt to Import the Module ---
+    # Import is needed whether it was just installed or already existed but wasn't loaded into the session.
+    try {
+        Write-Host "Importing PSWindowsUpdate module into current session..." -ForegroundColor Cyan
+        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
+        # Write-Host "PSWindowsUpdate module imported successfully and is ready for use." -ForegroundColor Green
+    } catch {
+        $errorMessage = "Failed to import PSWindowsUpdate module (even after potential install): $($_.Exception.Message)"
+        Write-Host $errorMessage -ForegroundColor Red
+        [System.Windows.Forms.MessageBox]::Show($errorMessage, "Module Import Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        throw # Re-throw to be caught by the calling try/catch, which will exit.
+    }
+}
+
+# --- Initial Module Check, Installation (if needed), and Import ---
+# This section now calls the Ensure-PSWindowsUpdate function.
+Write-Host "Initializing script and ensuring PSWindowsUpdate module is available..."
+try {
+    # Call the function that handles checking, installing (if needed), and importing.
+    Ensure-PSWindowsUpdate
+
+    # If Ensure-PSWindowsUpdate completes without throwing an error, the module is ready.
+    Write-Host "PSWindowsUpdate module is confirmed available and imported." -ForegroundColor Green
+
+} catch {
+    # This catch block handles errors thrown by Ensure-PSWindowsUpdate
+    # (either during NuGet provider install, module install, or module import).
+    $detailedError = "A critical error occurred while trying to make the PSWindowsUpdate module available.`n`nError details: $($_.Exception.Message)`n`nThe script cannot continue without this module and will now exit."
+    Write-Host $detailedError -ForegroundColor Red
+    [System.Windows.Forms.MessageBox]::Show($detailedError, "Fatal Module Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Critical)
+
+    # It's crucial to exit if the module cannot be made ready,
+    # as other parts of your script (like the Windows Update tab) will depend on it.
+    Write-Host "Exiting script due to PSWindowsUpdate module failure."
+    exit 1 # Exit with a non-zero code to indicate failure
+}
+
+# --- Module Check and Install/Import Trigger ---
+Write-Host "Starting script..."
+
+try {
+    # Call the function that ensures the module is installed and imported
+    Ensure-PSWindowsUpdate
+
+    # If Ensure-PSWindowsUpdate completes without throwing an error, the module is ready.
+    Write-Host "PSWindowsUpdate module is ready for use." -ForegroundColor Green
+
+} catch {
+    # This catch block handles errors thrown by Ensure-PSWindowsUpdate (either during install or import)
+    $errorMessage = "Fatal Error: Could not ensure PSWindowsUpdate module is available.`n`nDetails: $($_.Exception.Message)"
+    Write-Host "Script terminating due to module error." -ForegroundColor Red
+    [System.Windows.Forms.MessageBox]::Show($errorMessage, "Initialization Failed", 'OK', 'Error')
+
+    # Since the Windows Update tab relies heavily on this module, it's best to exit
+    # if it cannot be installed/imported.
+    exit
 }
 
 # ============================================
@@ -54,18 +128,84 @@ $tabSystemInfo = New-Object System.Windows.Forms.TabPage
 $tabSystemInfo.Text = "System Info"
 $tabSystemInfo.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 
-# Add SwiftTune Logo to System Info Tab (use provided path)
-$logoPath = "https://i.ibb.co/rfcGvjRw/Swift-Tune-Logo.png"
-if (Test-Path $logoPath) {
-    $logoImage = [System.Drawing.Image]::FromFile($logoPath)
+# Add SwiftTune Logo to System Info Tab (from URL)
+$logoUrl = "https://i.ibb.co/rfcGvjRw/Swift-Tune-Logo.png" # Your URL
+$logoImage = $null # Initialize to null
 
+try {
+    Write-Host "Attempting to download logo from: $logoUrl"
+    $webClient = New-Object System.Net.WebClient
+    $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:100.0) Gecko/20100101 Firefox/100.0")
+    $imageBytes = $webClient.DownloadData($logoUrl)
+
+    if ($imageBytes -and $imageBytes.Length -gt 0) {
+        # FIX 1: Use comma operator to pass $imageBytes as a single array argument
+        $memoryStream = New-Object System.IO.MemoryStream(,$imageBytes) # Note the comma
+        $logoImage = [System.Drawing.Image]::FromStream($memoryStream)
+        $memoryStream.Close() # Good practice to close streams when done
+        Write-Host "Logo downloaded and loaded successfully."
+    } else {
+        Write-Warning "Downloaded image data was empty or invalid from URL: $logoUrl"
+    }
+} catch {
+    Write-Warning "Failed to download or load logo from URL: $logoUrl. Error: $($_.Exception.Message)"
+    # You can also print the full error record for more details if needed:
+    # Write-Warning "Full error record: $_"
+}
+
+# Only add the PictureBox if the image was loaded successfully
+if ($logoImage) {
     $logoBox = New-Object System.Windows.Forms.PictureBox
     $logoBox.Image = $logoImage
     $logoBox.SizeMode = 'Zoom'
     $logoBox.Size = New-Object System.Drawing.Size(150, 150)
+    $logoBox.Location = New-Object System.Drawing.Point(425, 10)
+    $tabSystemInfo.Controls.Add($logoBox)
+} else {
+    Write-Host "Logo could not be displayed as it failed to load from the URL."
+    $noLogoLabel = New-Object System.Windows.Forms.Label
+    $noLogoLabel.Text = "Logo unavailable"
+    $noLogoLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $noLogoLabel.ForeColor = [System.Drawing.Color]::FromArgb(220, 220, 220)
+    $noLogoLabel.BackColor = $tabSystemInfo.BackColor
+    $noLogoLabel.AutoSize = $true # Ensure AutoSize is true for PreferredSize
+
+    # FIX 2: Add the label to the parent control BEFORE calculating location based on PreferredSize
+    $tabSystemInfo.Controls.Add($noLogoLabel)
+
+    # Now calculate location
+    # Ensure PreferredSize.Width and Height are treated as numbers
+    $labelWidth = [int]$noLogoLabel.PreferredSize.Width
+    $labelHeight = [int]$noLogoLabel.PreferredSize.Height
+    $logoBoxWidth = 150 # Intended width of the logo area
+    $logoBoxHeight = 150 # Intended height of the logo area
+
+    $locationX = 425 + ($logoBoxWidth - $labelWidth) / 2
+    $locationY = 10 + ($logoBoxHeight - $labelHeight) / 2
+    $noLogoLabel.Location = New-Object System.Drawing.Point([int]$locationX, [int]$locationY)
+}
+
+# Only add the PictureBox if the image was loaded successfully
+if ($logoImage) {
+    $logoBox = New-Object System.Windows.Forms.PictureBox
+    $logoBox.Image = $logoImage
+    $logoBox.SizeMode = 'Zoom' # Or 'StretchImage', 'CenterImage', etc.
+    $logoBox.Size = New-Object System.Drawing.Size(150, 150)
     $logoBox.Location = New-Object System.Drawing.Point(425, 10)  # Centered horizontally near top
 
     $tabSystemInfo.Controls.Add($logoBox)
+} else {
+    Write-Host "Logo could not be displayed as it failed to load from the URL."
+    # You could add a placeholder label if the logo fails to load
+    $noLogoLabel = New-Object System.Windows.Forms.Label
+    $noLogoLabel.Text = "Logo unavailable"
+    $noLogoLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $noLogoLabel.ForeColor = [System.Drawing.Color]::FromArgb(220, 220, 220) # Light gray
+    $noLogoLabel.BackColor = $tabSystemInfo.BackColor # Match tab background
+    $noLogoLabel.AutoSize = $true
+    # Calculate position to be roughly where the logo would be
+    $noLogoLabel.Location = New-Object System.Drawing.Point(425 + (150 - $noLogoLabel.PreferredSize.Width)/2, 10 + (150 - $noLogoLabel.PreferredSize.Height)/2)
+    $tabSystemInfo.Controls.Add($noLogoLabel)
 }
 
 # Collect system info
@@ -439,88 +579,97 @@ $updateListView = New-Object System.Windows.Forms.ListView
 $updateListView.Location = New-Object System.Drawing.Point(20, 40)
 $updateListView.Size = New-Object System.Drawing.Size(940, 500)
 $updateListView.View = 'Details'
-$updateListView.CheckBoxes = $true
 $updateListView.FullRowSelect = $true
 $updateListView.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
 $updateListView.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
-$updateListView.Columns.Add("Type", 100)       # Index 0
-$updateListView.Columns.Add("Title", 500)      # Index 1
-$updateListView.Columns.Add("KB", 100)         # Index 2
-$updateListView.Columns.Add("Size (MB)", 100)  # Index 3
-$updateListView.Columns.Add("Downloaded", 80) # Index 4
+$updateListView.Columns.Add("Type", 100) | Out-Null
+$updateListView.Columns.Add("Title", 500) | Out-Null
+$updateListView.Columns.Add("KB", 100) | Out-Null
+$updateListView.Columns.Add("Size (MB)", 100) | Out-Null
+$updateListView.Columns.Add("Downloaded", 80) | Out-Null
 $tabUpdates.Controls.Add($updateListView)
 
 
 # --- Function to Get Updates using WUA COM ---
 function Get-UpdatesWUA {
     param(
-        [string]$Criteria = "IsInstalled=0 and IsHidden=0" # Default criteria
-    )
-    Write-Host "Initializing WUA COM Session..."
-    # Use try/catch for COM object creation
+		[string]$Criteria = "IsInstalled=0"
+	)
+    Write-Host "Initializing WUA COM Session for Get-UpdatesWUA..." -ForegroundColor Cyan
     $updateSession = $null
     $updateSearcher = $null
+    $searchResult = $null # Ensure it's null at the start
+
     try {
         $updateSession = New-Object -ComObject "Microsoft.Update.Session"
-        $updateSearcher = $updateSession.CreateUpdateSearcher() # CORRECTED: Removed -ErrorAction
-    } catch {
-         Write-Host "Error initializing WUA COM objects: $($_.Exception.ToString())" -ForegroundColor Red
-         throw "Failed to initialize WUA COM Session: $($_.Exception.Message)"
-    }
+        $updateSearcher = $updateSession.CreateUpdateSearcher()
+        $updateSearcher.Online = $true # Search online
+        # Optional: Explicitly set server selection if you suspect WSUS issues, though default is usually fine.
+        # $updateSearcher.ServerSelection = 2 # ssWindowsUpdate (see WUA docs for ServerSelection constants)
+        # Write-Host "WUA Searcher ServerSelection: $($updateSearcher.ServerSelection)" -ForegroundColor Gray
 
-    $updateSearcher.Online = $true # Search online
+        Write-Host "Searching for updates with criteria: '$Criteria'" -ForegroundColor Yellow
+        $searchResult = $updateSearcher.Search($Criteria) # This can take time
 
-    Write-Host "Searching for updates with criteria: $Criteria"
-    try {
-        # Search might take time and can throw COM exceptions
-        $searchResult = $updateSearcher.Search($Criteria)
-        Write-Host "Search completed. Found $($searchResult.Updates.Count) raw updates."
+        Write-Host "Search completed. Raw updates found by WUA COM: $($searchResult.Updates.Count)" -ForegroundColor Green
 
-        # Process results into simpler objects for the listview
         $processedUpdates = @()
         if ($searchResult.Updates.Count -gt 0) {
+            Write-Host "Processing $($searchResult.Updates.Count) raw updates..."
             foreach ($update in $searchResult.Updates) {
-                # Extract properties carefully, handling potential errors or nulls
                 try {
                     $title = $update.Title
-                    $kb = ($update.KBArticleIDs | Select-Object -First 1) # Get first KB if available
+                    # Log more details about each update found by the raw search
+                    Write-Host "  Raw Update Found: `"$($title)`"" -ForegroundColor Gray
+                    Write-Host "    IsInstalled: $($update.IsInstalled), IsHidden: $($update.IsHidden), IsDownloaded: $($update.IsDownloaded), IsBeta: $($update.IsBeta)" -ForegroundColor Gray
+                    Write-Host "    Categories: $($update.Categories | ForEach-Object {$_.Name}) " -ForegroundColor Gray
+                    
+                    $kb = ($update.KBArticleIDs | Select-Object -First 1)
                     if ([string]::IsNullOrEmpty($kb)) { $kb = "N/A" }
                     $sizeBytes = $update.MaxDownloadSize
                     $sizeMB = if ($sizeBytes -gt 0) { [math]::Round($sizeBytes / 1MB, 2) } else { 0 }
                     $isDownloaded = $update.IsDownloaded
+                    
                     $categories = $update.Categories | ForEach-Object { $_.Name }
                     $type = "Software" # Default
                     if ($categories -contains 'Security Updates') { $type = "Security" }
                     if ($categories -contains 'Update Rollups') { $type = "Rollup" }
                     if ($categories -contains 'Critical Updates') { $type = "Critical" }
                     if ($categories -contains 'Drivers') { $type = "Driver" }
-                    # Add more specific types if needed
+                    if ($categories -contains 'Feature Packs') { $type = "Feature Pack" } # Added
+                    if ($categories -contains 'Update Rollups') { $type = "Rollup" } # Was duplicate, fine
+                    if ($categories -contains 'Windows Anytime Upgrade') { $type = "Upgrade" } # Added
+                    if ($update.Title -match "Feature update") { $type = "Feature Update" } # Heuristic
 
-                    # Store essential info and the raw COM object (or its identity)
                     $processedUpdates += [PSCustomObject]@{
                         Type         = $type
                         Title        = $title
                         KB           = $kb
                         SizeMB       = $sizeMB
                         IsDownloaded = $isDownloaded
-                        RawUpdateObj = $update # Store the raw COM object for installation
+                        RawUpdateObj = $update
                     }
                 } catch {
-                     Write-Warning "Skipping an update due to error processing its properties: $($_.Exception.Message)"
+                    Write-Warning "Skipping an update due to error processing its properties: $($update.Title) - $($_.Exception.Message)"
                 }
             }
+        } else {
+            Write-Host "No updates matched the criteria '$Criteria' according to WUA COM search." -ForegroundColor Yellow
         }
-        Write-Host "Processed $($processedUpdates.Count) updates for display."
+        Write-Host "Processed $($processedUpdates.Count) updates for display." -ForegroundColor Green
         return $processedUpdates
     } catch {
-        Write-Host "Error during WUA search: $($_.Exception.ToString())" -ForegroundColor Red
-        throw "Failed to search for updates using WUA: $($_.Exception.Message)" # Rethrow simplified message
+        Write-Host "Error during WUA search or processing: $($_.Exception.ToString())" -ForegroundColor Red
+        # If searchResult is available, show its HResult
+        if ($searchResult -ne $null) {
+            Write-Host "Search Result HResult (if available): $($searchResult.HResult)" -ForegroundColor Red
+        }
+        throw "Failed to search/process updates using WUA: $($_.Exception.Message)"
     } finally {
-        # Release COM objects (optional, PowerShell usually handles this, but good practice)
         if ($updateSearcher) { try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($updateSearcher) | Out-Null } catch {} }
         if ($updateSession) { try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($updateSession) | Out-Null } catch {} }
-        # Trigger garbage collection (use sparingly if performance is critical)
-        # [System.GC]::Collect()
+        Write-Host "WUA COM objects for Get-UpdatesWUA released." -ForegroundColor Cyan
+        # [System.GC]::Collect() # Usually not needed and can impact performance
         # [System.GC]::WaitForPendingFinalizers()
     }
 }
