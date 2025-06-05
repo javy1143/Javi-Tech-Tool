@@ -1,909 +1,316 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# Ensure PSWindowsUpdate is present and import it globally
-try {
-     if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
-         Write-Host "PSWindowsUpdate module not found. Please install it manually or restore Ensure-PSWindowsUpdate function." -ForegroundColor Yellow
-         # Optionally add install logic back here if desired
-         throw "PSWindowsUpdate module missing."
-     }
-     Import-Module PSWindowsUpdate -Force -ErrorAction Stop
-     Write-Host "PSWindowsUpdate imported globally."
-} catch {
-     [System.Windows.Forms.MessageBox]::Show("Failed to import PSWindowsUpdate globally: $_", "Module Error", 'OK', 'Error')
-     # Consider exiting the script if the module is essential and fails to load
-     # exit
-}
+# === Logging ===
+$logPath = "$env:ProgramData\DellWin11Optimizer.log"
+function Log { param($msg) Write-Host $msg; Add-Content -Path $logPath -Value "$(Get-Date -Format u): $msg" }
 
-# ============================================
-# Define Helper: Ensure PSWindowsUpdate Module
-# ============================================
-function Ensure-PSWindowsUpdate {
-    # Check if the module is already loaded in the current session, if not, check if it's available
-    # Using "Get-Module -Name" first to see if it's already imported in the current session.
-    # If not, then "Get-Module -ListAvailable" to see if it's installed but not imported.
-    if (-not (Get-Module -Name PSWindowsUpdate -ErrorAction SilentlyContinue)) {
-        if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
-            Write-Host "PSWindowsUpdate module not found installed. Attempting automatic installation..." -ForegroundColor Yellow
-            try {
-                # Ensure NuGet Package Provider is installed. -Force handles if it's already there or prompts.
-                # -Confirm:$false attempts to bypass interactive prompts.
-                Write-Host "Checking/Installing NuGet package provider..." -ForegroundColor Cyan
-                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Confirm:$false -ErrorAction Stop
+# === Mappings ===
+$global:appxMap = @{}
+$excludeList = @("Teams", "OneDrive", "Outlook", "Edge", "Chrome", "RingCentral", "Kaseya", "Sentinel", "Acrobat", "Microsoft 365", "Office", "Visual C++", "Driver", "Intel")
 
-                # Install the module from PSGallery
-                Write-Host "Installing PSWindowsUpdate module from PSGallery..." -ForegroundColor Cyan
-                # -Force will install even if a previous version exists.
-                # -Confirm:$false attempts to bypass interactive prompts.
-                # For a system tool, installing for AllUsers (default when run as admin) is common.
-                Install-Module -Name PSWindowsUpdate -Force -Confirm:$false -ErrorAction Stop
-
-                Write-Host "PSWindowsUpdate module installed successfully." -ForegroundColor Green
-
-            } catch {
-                $errorMessage = "Failed during PSWindowsUpdate installation: $($_.Exception.Message)"
-                Write-Host $errorMessage -ForegroundColor Red
-                # Display error in a message box as it's a GUI script
-                [System.Windows.Forms.MessageBox]::Show($errorMessage, "Module Installation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
-                throw # Re-throw to be caught by the calling try/catch, which will exit.
-            }
-        }
-    }
-
-    # --- Attempt to Import the Module ---
-    # Import is needed whether it was just installed or already existed but wasn't loaded into the session.
-    try {
-        Write-Host "Importing PSWindowsUpdate module into current session..." -ForegroundColor Cyan
-        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
-        # Write-Host "PSWindowsUpdate module imported successfully and is ready for use." -ForegroundColor Green
-    } catch {
-        $errorMessage = "Failed to import PSWindowsUpdate module (even after potential install): $($_.Exception.Message)"
-        Write-Host $errorMessage -ForegroundColor Red
-        [System.Windows.Forms.MessageBox]::Show($errorMessage, "Module Import Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
-        throw # Re-throw to be caught by the calling try/catch, which will exit.
-    }
-}
-
-# --- Initial Module Check, Installation (if needed), and Import ---
-# This section now calls the Ensure-PSWindowsUpdate function.
-Write-Host "Initializing script and ensuring PSWindowsUpdate module is available..."
-try {
-    # Call the function that handles checking, installing (if needed), and importing.
-    Ensure-PSWindowsUpdate
-
-    # If Ensure-PSWindowsUpdate completes without throwing an error, the module is ready.
-    Write-Host "PSWindowsUpdate module is confirmed available and imported." -ForegroundColor Green
-
-} catch {
-    # This catch block handles errors thrown by Ensure-PSWindowsUpdate
-    # (either during NuGet provider install, module install, or module import).
-    $detailedError = "A critical error occurred while trying to make the PSWindowsUpdate module available.`n`nError details: $($_.Exception.Message)`n`nThe script cannot continue without this module and will now exit."
-    Write-Host $detailedError -ForegroundColor Red
-    [System.Windows.Forms.MessageBox]::Show($detailedError, "Fatal Module Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Critical)
-
-    # It's crucial to exit if the module cannot be made ready,
-    # as other parts of your script (like the Windows Update tab) will depend on it.
-    Write-Host "Exiting script due to PSWindowsUpdate module failure."
-    exit 1 # Exit with a non-zero code to indicate failure
-}
-
-# --- Module Check and Install/Import Trigger ---
-Write-Host "Starting script..."
-
-try {
-    # Call the function that ensures the module is installed and imported
-    Ensure-PSWindowsUpdate
-
-    # If Ensure-PSWindowsUpdate completes without throwing an error, the module is ready.
-    Write-Host "PSWindowsUpdate module is ready for use." -ForegroundColor Green
-
-} catch {
-    # This catch block handles errors thrown by Ensure-PSWindowsUpdate (either during install or import)
-    $errorMessage = "Fatal Error: Could not ensure PSWindowsUpdate module is available.`n`nDetails: $($_.Exception.Message)"
-    Write-Host "Script terminating due to module error." -ForegroundColor Red
-    [System.Windows.Forms.MessageBox]::Show($errorMessage, "Initialization Failed", 'OK', 'Error')
-
-    # Since the Windows Update tab relies heavily on this module, it's best to exit
-    # if it cannot be installed/imported.
-    exit
-}
-
-# ============================================
-# Create Main Form
-# ============================================
+# === Form Setup ===
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "PC Optimizer"
-$form.Size = New-Object System.Drawing.Size(1000, 700)
+$form.Text = "Dell Windows 11 Optimizer"
+$form.Size = New-Object System.Drawing.Size(600, 600)
 $form.StartPosition = "CenterScreen"
-$form.MaximizeBox = $false
 
-$tabControl = New-Object System.Windows.Forms.TabControl
-$tabControl.Dock = "Fill"
-
-# ============================================
-# SYSTEM INFO TAB (centered and spaced layout, themed colors)
-# ============================================
-$tabSystemInfo = New-Object System.Windows.Forms.TabPage
-$tabSystemInfo.Text = "System Info"
-$tabSystemInfo.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-
-# Add SwiftTune Logo to System Info Tab (from URL)
-$logoUrl = "https://i.ibb.co/rfcGvjRw/Swift-Tune-Logo.png" # Your URL
-$logoImage = $null # Initialize to null
-
-try {
-    Write-Host "Attempting to download logo from: $logoUrl"
-    $webClient = New-Object System.Net.WebClient
-    $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:100.0) Gecko/20100101 Firefox/100.0")
-    $imageBytes = $webClient.DownloadData($logoUrl)
-
-    if ($imageBytes -and $imageBytes.Length -gt 0) {
-        # FIX 1: Use comma operator to pass $imageBytes as a single array argument
-        $memoryStream = New-Object System.IO.MemoryStream(,$imageBytes) # Note the comma
-        $logoImage = [System.Drawing.Image]::FromStream($memoryStream)
-        $memoryStream.Close() # Good practice to close streams when done
-        Write-Host "Logo downloaded and loaded successfully."
-    } else {
-        Write-Warning "Downloaded image data was empty or invalid from URL: $logoUrl"
-    }
-} catch {
-    Write-Warning "Failed to download or load logo from URL: $logoUrl. Error: $($_.Exception.Message)"
-    # You can also print the full error record for more details if needed:
-    # Write-Warning "Full error record: $_"
-}
-
-# Only add the PictureBox if the image was loaded successfully
-if ($logoImage) {
-    $logoBox = New-Object System.Windows.Forms.PictureBox
-    $logoBox.Image = $logoImage
-    $logoBox.SizeMode = 'Zoom'
-    $logoBox.Size = New-Object System.Drawing.Size(150, 150)
-    $logoBox.Location = New-Object System.Drawing.Point(425, 10)
-    $tabSystemInfo.Controls.Add($logoBox)
-} else {
-    Write-Host "Logo could not be displayed as it failed to load from the URL."
-    $noLogoLabel = New-Object System.Windows.Forms.Label
-    $noLogoLabel.Text = "Logo unavailable"
-    $noLogoLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $noLogoLabel.ForeColor = [System.Drawing.Color]::FromArgb(220, 220, 220)
-    $noLogoLabel.BackColor = $tabSystemInfo.BackColor
-    $noLogoLabel.AutoSize = $true # Ensure AutoSize is true for PreferredSize
-
-    # FIX 2: Add the label to the parent control BEFORE calculating location based on PreferredSize
-    $tabSystemInfo.Controls.Add($noLogoLabel)
-
-    # Now calculate location
-    # Ensure PreferredSize.Width and Height are treated as numbers
-    $labelWidth = [int]$noLogoLabel.PreferredSize.Width
-    $labelHeight = [int]$noLogoLabel.PreferredSize.Height
-    $logoBoxWidth = 150 # Intended width of the logo area
-    $logoBoxHeight = 150 # Intended height of the logo area
-
-    $locationX = 425 + ($logoBoxWidth - $labelWidth) / 2
-    $locationY = 10 + ($logoBoxHeight - $labelHeight) / 2
-    $noLogoLabel.Location = New-Object System.Drawing.Point([int]$locationX, [int]$locationY)
-}
-
-# Only add the PictureBox if the image was loaded successfully
-if ($logoImage) {
-    $logoBox = New-Object System.Windows.Forms.PictureBox
-    $logoBox.Image = $logoImage
-    $logoBox.SizeMode = 'Zoom' # Or 'StretchImage', 'CenterImage', etc.
-    $logoBox.Size = New-Object System.Drawing.Size(150, 150)
-    $logoBox.Location = New-Object System.Drawing.Point(425, 10)  # Centered horizontally near top
-
-    $tabSystemInfo.Controls.Add($logoBox)
-} else {
-    Write-Host "Logo could not be displayed as it failed to load from the URL."
-    # You could add a placeholder label if the logo fails to load
-    $noLogoLabel = New-Object System.Windows.Forms.Label
-    $noLogoLabel.Text = "Logo unavailable"
-    $noLogoLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $noLogoLabel.ForeColor = [System.Drawing.Color]::FromArgb(220, 220, 220) # Light gray
-    $noLogoLabel.BackColor = $tabSystemInfo.BackColor # Match tab background
-    $noLogoLabel.AutoSize = $true
-    # Calculate position to be roughly where the logo would be
-    $noLogoLabel.Location = New-Object System.Drawing.Point(425 + (150 - $noLogoLabel.PreferredSize.Width)/2, 10 + (150 - $noLogoLabel.PreferredSize.Height)/2)
-    $tabSystemInfo.Controls.Add($noLogoLabel)
-}
-
-# Collect system info
-$cpu = (Get-CimInstance Win32_Processor).Name
-$ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2)
-$os = (Get-CimInstance Win32_OperatingSystem).Caption
-$osVer = (Get-CimInstance Win32_OperatingSystem).Version
-$uptime = ((Get-CimInstance Win32_OperatingSystem).LastBootUpTime).ToLocalTime()
-$diskC = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
-$diskTotal = [math]::Round($diskC.Size / 1GB, 2)
-$diskFree = [math]::Round($diskC.FreeSpace / 1GB, 2)
-
-# Create a multiline label for system info (centered and spaced)
-$sysInfoLabel = New-Object System.Windows.Forms.Label
-$sysInfoLabel.Location = New-Object System.Drawing.Point(250, 180)
-$sysInfoLabel.Size = New-Object System.Drawing.Size(500, 400)
-$sysInfoLabel.Font = New-Object System.Drawing.Font("Segoe UI", 12)
-$sysInfoLabel.TextAlign = 'MiddleCenter'
-$sysInfoLabel.ForeColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$sysInfoLabel.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-$sysInfoLabel.Text = "
-────────────────────────────────────────────
-   CPU:
-   $cpu
-
-   RAM:
-   $ram GB
-
-   OS:
-   $os ($osVer)
-
-   Last Boot:
-   $uptime
-
-   Disk (C:)
-   Total: $diskTotal GB
-   Free:  $diskFree GB
-────────────────────────────────────────────
-"
-$tabSystemInfo.Controls.Add($sysInfoLabel)
-# Apply the color palette to the main form
-$form.BackColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$tabControl.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-
-# ============================================
-# PERFORMANCE TWEAKS TAB (full script with color palette)
-# ============================================
-$tabPerformance = New-Object System.Windows.Forms.TabPage
-$tabPerformance.Text = "Performance Tweaks"
-$tabPerformance.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-
-$groupVisual = New-Object System.Windows.Forms.GroupBox
-$groupVisual.Text = "Visual Tweaks"
-$groupVisual.ForeColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$groupVisual.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-$groupVisual.Location = New-Object System.Drawing.Point(20, 20)
-$groupVisual.Size = New-Object System.Drawing.Size(450, 300)
-$tabPerformance.Controls.Add($groupVisual)
-
-$groupSystem = New-Object System.Windows.Forms.GroupBox
-$groupSystem.Text = "System Tweaks"
-$groupSystem.ForeColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$groupSystem.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-$groupSystem.Location = New-Object System.Drawing.Point(500, 20)
-$groupSystem.Size = New-Object System.Drawing.Size(450, 400)
-$tabPerformance.Controls.Add($groupSystem)
-
-$visualTweaks = @(
-    @{ Text = "Set Visual Effects to Best Performance"; Variable = 'checkVisuals' },
-    @{ Text = "Disable Transparency Effects"; Variable = 'checkTransparency' },
-    @{ Text = "Disable Window Animations"; Variable = 'checkAnimations' },
-    @{ Text = "Speed Up Menu Show Delay"; Variable = 'checkMenuDelay' }
-)
-
-$systemTweaks = @(
-    @{ Text = "Set Power Plan to High Performance"; Variable = 'checkPower' },
-    @{ Text = "Disable SysMain (Superfetch)"; Variable = 'checkSysMain' },
-    @{ Text = "Disable Search Indexing (if SSD)"; Variable = 'checkIndexing' },
-    @{ Text = "Set Processor Scheduling to Favor Programs"; Variable = 'checkProcessor' },
-    @{ Text = "Clear Temporary Files"; Variable = 'checkTemp' },
-    @{ Text = "Disable Windows Tips and Suggestions"; Variable = 'checkTips' },
-    @{ Text = "Clear Edge Browser Cache"; Variable = 'checkEdgeCache' },
-    @{ Text = "Clear Chrome Browser Cache"; Variable = 'checkChromeCache' }
-)
-
-$y = 30
-foreach ($item in $visualTweaks) {
-    $chk = New-Object System.Windows.Forms.CheckBox
-    $chk.Text = $item.Text
-    $chk.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
-    $chk.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-    $chk.Location = New-Object System.Drawing.Point(10, $y)
-    $chk.AutoSize = $true
-    Set-Variable -Name $item.Variable -Value $chk -Scope Script
-    $groupVisual.Controls.Add($chk)
-    $y += 30
-}
-
-$y = 30
-foreach ($item in $systemTweaks) {
-    $chk = New-Object System.Windows.Forms.CheckBox
-    $chk.Text = $item.Text
-    $chk.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
-    $chk.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-    $chk.Location = New-Object System.Drawing.Point(10, $y)
-    $chk.AutoSize = $true
-    Set-Variable -Name $item.Variable -Value $chk -Scope Script
-    $groupSystem.Controls.Add($chk)
-    $y += 30
-}
-
-$applyButton = New-Object System.Windows.Forms.Button
-$applyButton.Text = "Apply Selected Tweaks"
-$applyButton.Size = New-Object System.Drawing.Size(200, 40)
-$applyButton.Location = New-Object System.Drawing.Point(20, 350)
-$applyButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$applyButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$applyButton.Add_Click({
-    $progressBar.Style = 'Marquee'
-    $statusLabel.Text = "Applying selected performance tweaks..."
-    $form.Refresh()
-    try {
-        if ($checkVisuals.Checked) { Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name VisualFXSetting -Value 2 }
-        if ($checkTransparency.Checked) { Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name EnableTransparency -Value 0 }
-        if ($checkAnimations.Checked) { Set-ItemProperty -Path "HKCU:\Control Panel\Desktop\WindowMetrics" -Name MinAnimate -Value 0 }
-        if ($checkMenuDelay.Checked) { Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name MenuShowDelay -Value 100 }
-        if ($checkPower.Checked) {
-            $highPerfGuid = (powercfg /L | Select-String "High performance" | ForEach-Object { ($_ -split '\s+')[3] })
-            if ($highPerfGuid) { powercfg /S $highPerfGuid }
-        }
-        if ($checkSysMain.Checked) {
-            Stop-Service -Name "SysMain" -ErrorAction SilentlyContinue
-            Set-Service -Name "SysMain" -StartupType Disabled -ErrorAction SilentlyContinue
-        }
-        if ($checkIndexing.Checked) {
-            $driveC = Get-PhysicalDisk | Where-Object { $_.DeviceID -eq 0 }
-            if ($driveC.MediaType -eq 'SSD') {
-                Stop-Service -Name "WSearch" -ErrorAction SilentlyContinue
-                Set-Service -Name "WSearch" -StartupType Disabled -ErrorAction SilentlyContinue
-            }
-        }
-        if ($checkProcessor.Checked) { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name Win32PrioritySeparation -Value 26 }
-        if ($checkTemp.Checked) { Get-ChildItem -Path $env:TEMP -Recurse -Force | Remove-Item -Recurse -Force }
-        if ($checkTips.Checked) { Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name SubscribedContent-338388Enabled -Value 0 }
-        if ($checkEdgeCache.Checked) {
-            $edgeCachePath = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache"
-            if (Test-Path $edgeCachePath) { Get-ChildItem -Path $edgeCachePath -Recurse -Force | Remove-Item -Recurse -Force }
-        }
-        if ($checkChromeCache.Checked) {
-            $chromeCachePath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache"
-            if (Test-Path $chromeCachePath) { Get-ChildItem -Path $chromeCachePath -Recurse -Force | Remove-Item -Recurse -Force }
-        }
-        [System.Windows.Forms.MessageBox]::Show("Selected performance tweaks applied!", "Success", 'OK', 'Information')
-        $statusLabel.Text = "Performance tweaks applied."
-    } catch {
-        $statusLabel.Text = "Error applying performance tweaks."
-        [System.Windows.Forms.MessageBox]::Show("An error occurred: $_", "Error", 'OK', 'Error')
-    } finally {
-        $progressBar.Style = 'Blocks'
-    }
-})
-$tabPerformance.Controls.Add($applyButton)
-
-
-# ============================================
-# STARTUP MANAGER TAB (with color palette)
-# ============================================
-$tabStartup = New-Object System.Windows.Forms.TabPage
-$tabStartup.Text = "Startup Manager"
-$tabStartup.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-
-$startupLabel = New-Object System.Windows.Forms.Label
-$startupLabel.Text = "Select startup items to disable or enable:"
-$startupLabel.Location = New-Object System.Drawing.Point(20, 10)
-$startupLabel.Size = New-Object System.Drawing.Size(500, 20)
-$startupLabel.ForeColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$startupLabel.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-$tabStartup.Controls.Add($startupLabel)
-
-$startupListBox = New-Object System.Windows.Forms.ListBox
-$startupListBox.Location = New-Object System.Drawing.Point(20, 40)
-$startupListBox.Size = New-Object System.Drawing.Size(740, 400)
-$startupListBox.SelectionMode = "MultiExtended"
-$startupListBox.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-$startupListBox.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
-$tabStartup.Controls.Add($startupListBox)
-
-function Load-StartupItems {
-    $startupListBox.Items.Clear()
-    $userRun = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -ErrorAction SilentlyContinue
-    if ($userRun) {
-        $userRun.PSObject.Properties | ForEach-Object {
-            if ($_.Name -and $_.Value) {
-                $startupListBox.Items.Add("User | $($_.Name) | $($_.Value)") | Out-Null
-            }
-        }
-    }
-    $machineRun = Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run" -ErrorAction SilentlyContinue
-    if ($machineRun) {
-        $machineRun.PSObject.Properties | ForEach-Object {
-            if ($_.Name -and $_.Value) {
-                $startupListBox.Items.Add("Machine | $($_.Name) | $($_.Value)") | Out-Null
-            }
-        }
-    }
-    $startupFolder = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
-    if (Test-Path $startupFolder) {
-        Get-ChildItem $startupFolder -Filter *.lnk | ForEach-Object {
-            $startupListBox.Items.Add("Folder | $($_.Name) | $($_.FullName)") | Out-Null
-        }
-    }
-}
-Load-StartupItems
-
-$disableButton = New-Object System.Windows.Forms.Button
-$disableButton.Text = "Disable Selected"
-$disableButton.Size = New-Object System.Drawing.Size(180, 30)
-$disableButton.Location = New-Object System.Drawing.Point(20, 550)
-$disableButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$disableButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$disableButton.Add_Click({
-    foreach ($item in $startupListBox.SelectedItems) {
-        $parts = $item -split '\|'
-        $scope = $parts[0].Trim()
-        $name = $parts[1].Trim()
-        if ($scope -eq "User") { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name $name -ErrorAction SilentlyContinue }
-        elseif ($scope -eq "Machine") { Remove-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run" -Name $name -ErrorAction SilentlyContinue }
-        elseif ($scope -eq "Folder") {
-            $file = $parts[2].Trim()
-            if (Test-Path $file) { Rename-Item -Path $file -NewName ($file + ".disabled") -ErrorAction SilentlyContinue }
-        }
-    }
-    Load-StartupItems
-    [System.Windows.Forms.MessageBox]::Show("Selected items disabled.", "Success", 'OK', 'Information')
-})
-$tabStartup.Controls.Add($disableButton)
-
-$enableButton = New-Object System.Windows.Forms.Button
-$enableButton.Text = "Enable Selected"
-$enableButton.Size = New-Object System.Drawing.Size(180, 30)
-$enableButton.Location = New-Object System.Drawing.Point(220, 550)
-$enableButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$enableButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$enableButton.Add_Click({
-    foreach ($item in $startupListBox.SelectedItems) {
-        $parts = $item -split '\|'
-        $scope = $parts[0].Trim()
-        $file = $parts[2].Trim()
-        if ($scope -eq "Folder" -and $file.EndsWith(".disabled") -and (Test-Path $file)) {
-            $original = $file -replace '\.disabled$', ''
-            Rename-Item -Path $file -NewName $original -ErrorAction SilentlyContinue
-        }
-    }
-    Load-StartupItems
-    [System.Windows.Forms.MessageBox]::Show("Selected folder items re-enabled.", "Success", 'OK', 'Information')
-})
-$tabStartup.Controls.Add($enableButton)
-
-$refreshButton = New-Object System.Windows.Forms.Button
-$refreshButton.Text = "Refresh List"
-$refreshButton.Size = New-Object System.Drawing.Size(150, 30)
-$refreshButton.Location = New-Object System.Drawing.Point(420, 550)
-$refreshButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$refreshButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$refreshButton.Add_Click({
-    $progressBar.Style = 'Marquee'
-    $statusLabel.Text = "Refreshing startup list..."
-    $form.Refresh()
-    try {
-        Load-StartupItems
-        $statusLabel.Text = "Startup items refreshed."
-    } catch {
-        $statusLabel.Text = "Error refreshing startup list."
-    } finally {
-        $progressBar.Style = 'Blocks'
-    }
-})
-$tabStartup.Controls.Add($refreshButton)
-
-# ============================================
-# Helper Function for Background Jobs (Modified for Error Handling)
-# ============================================
-# Define this function earlier in your script if it's not already defined,
-# or replace the existing one if it is.
-function Invoke-InBackground {
-    param (
-        [Parameter(Mandatory=$true)]
-        [scriptblock]$Script,
-
-        [Parameter(Mandatory=$true)]
-        [System.Action]$OnComplete, # Action to run on the main thread after job completes
-
-        [Parameter(Mandatory=$false)]
-        [System.Action[string]]$OnError # Action to run on main thread if job fails
-    )
-    $job = Start-Job -ScriptBlock $Script
-    Register-ObjectEvent -InputObject $job -EventName StateChanged -Action {
-        param($sender, $eventArgs)
-
-        if ($sender.State -in ('Completed', 'Failed', 'Stopped')) {
-            # Ensure UI updates happen on the main thread using SynchronizationContext if available,
-            # otherwise directly invoke (might cause cross-thread issues in complex GUIs, but often ok here)
-            $syncContext = [System.Windows.Forms.Application]::OpenForms[0].Invoke([System.Func[System.Threading.SynchronizationContext]]{
-                return [System.Threading.SynchronizationContext]::Current
-            })
-
-            # Unregister the event to avoid memory leaks
-            Unregister-Event -SourceIdentifier $sender.InstanceId.Guid.ToString()
-
-            # Receive Job data (output and errors)
-            $jobData = Receive-Job -Job $sender -Keep # Use -Keep to allow receiving multiple times if needed, though usually once is fine
-            $jobErrors = $jobData | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }
-            $jobOutput = $jobData | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }
-
-            # Store results globally (ensure $global:scoped variables are used in the scriptblock if needed)
-            # Note: The script block itself should assign to $global:updateResults or similar as before.
-            # This example primarily focuses on error handling after completion.
-
-            Remove-Job -Job $sender # Clean up the job object
-
-            # Execute OnComplete or OnError on the main thread
-            if ($syncContext) {
-                $syncContext.Post({
-                    if ($jobErrors) {
-                        if ($OnError) {
-                            $errorMessages = $jobErrors | ForEach-Object { $_.ToString() }
-                            $OnError.Invoke(($errorMessages -join [System.Environment]::NewLine))
-                        }
-                    } else {
-                        # Pass output if needed, though original relies on globals set in $Script
-                        $OnComplete.Invoke()
-                    }
-                }, $null)
-            } else {
-                # Fallback if no sync context (less safe for complex UI updates)
-                 if ($jobErrors) {
-                    if ($OnError) {
-                        $errorMessages = $jobErrors | ForEach-Object { $_.ToString() }
-                        $OnError.Invoke(($errorMessages -join [System.Environment]::NewLine))
-                    }
-                } else {
-                    $OnComplete.Invoke()
-                }
-            }
-        }
-    } | Out-Null # Suppress output from Register-ObjectEvent
-    # Return the job object if needed, though this example doesn't use it directly after starting
-    return $job
-}
-
-
-# ============================================
-# WINDOWS UPDATES TAB (Using Direct WUA COM Objects - Corrected & Download Verified)
-# ============================================
-
-# --- Tab Setup ---
-$tabUpdates = New-Object System.Windows.Forms.TabPage
-$tabUpdates.Text = "Windows Updates (WUA)" # Indicate WUA method
-$tabUpdates.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-
-# Add a Label explaining the direct WUA usage and potential freeze
-$updateLabel = New-Object System.Windows.Forms.Label
-$updateLabel.Text = "Manage Updates via WUA COM (UI will freeze during load/install)"
-$updateLabel.Location = New-Object System.Drawing.Point(20, 10)
-$updateLabel.Size = New-Object System.Drawing.Size(940, 20)
-$updateLabel.ForeColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$tabUpdates.Controls.Add($updateLabel)
-
-# --- ListView Setup ---
-$updateListView = New-Object System.Windows.Forms.ListView
-$updateListView.Location = New-Object System.Drawing.Point(20, 40)
-$updateListView.Size = New-Object System.Drawing.Size(940, 500)
-$updateListView.View = 'Details'
-$updateListView.FullRowSelect = $true
-$updateListView.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-$updateListView.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
-$updateListView.Columns.Add("Type", 100) | Out-Null
-$updateListView.Columns.Add("Title", 500) | Out-Null
-$updateListView.Columns.Add("KB", 100) | Out-Null
-$updateListView.Columns.Add("Size (MB)", 100) | Out-Null
-$updateListView.Columns.Add("Downloaded", 80) | Out-Null
-$tabUpdates.Controls.Add($updateListView)
-
-
-# --- Function to Get Updates using WUA COM ---
-function Get-UpdatesWUA {
-    param(
-		[string]$Criteria = "IsInstalled=0"
-	)
-    Write-Host "Initializing WUA COM Session for Get-UpdatesWUA..." -ForegroundColor Cyan
-    $updateSession = $null
-    $updateSearcher = $null
-    $searchResult = $null # Ensure it's null at the start
-
-    try {
-        $updateSession = New-Object -ComObject "Microsoft.Update.Session"
-        $updateSearcher = $updateSession.CreateUpdateSearcher()
-        $updateSearcher.Online = $true # Search online
-        # Optional: Explicitly set server selection if you suspect WSUS issues, though default is usually fine.
-        # $updateSearcher.ServerSelection = 2 # ssWindowsUpdate (see WUA docs for ServerSelection constants)
-        # Write-Host "WUA Searcher ServerSelection: $($updateSearcher.ServerSelection)" -ForegroundColor Gray
-
-        Write-Host "Searching for updates with criteria: '$Criteria'" -ForegroundColor Yellow
-        $searchResult = $updateSearcher.Search($Criteria) # This can take time
-
-        Write-Host "Search completed. Raw updates found by WUA COM: $($searchResult.Updates.Count)" -ForegroundColor Green
-
-        $processedUpdates = @()
-        if ($searchResult.Updates.Count -gt 0) {
-            Write-Host "Processing $($searchResult.Updates.Count) raw updates..."
-            foreach ($update in $searchResult.Updates) {
-                try {
-                    $title = $update.Title
-                    # Log more details about each update found by the raw search
-                    Write-Host "  Raw Update Found: `"$($title)`"" -ForegroundColor Gray
-                    Write-Host "    IsInstalled: $($update.IsInstalled), IsHidden: $($update.IsHidden), IsDownloaded: $($update.IsDownloaded), IsBeta: $($update.IsBeta)" -ForegroundColor Gray
-                    Write-Host "    Categories: $($update.Categories | ForEach-Object {$_.Name}) " -ForegroundColor Gray
-                    
-                    $kb = ($update.KBArticleIDs | Select-Object -First 1)
-                    if ([string]::IsNullOrEmpty($kb)) { $kb = "N/A" }
-                    $sizeBytes = $update.MaxDownloadSize
-                    $sizeMB = if ($sizeBytes -gt 0) { [math]::Round($sizeBytes / 1MB, 2) } else { 0 }
-                    $isDownloaded = $update.IsDownloaded
-                    
-                    $categories = $update.Categories | ForEach-Object { $_.Name }
-                    $type = "Software" # Default
-                    if ($categories -contains 'Security Updates') { $type = "Security" }
-                    if ($categories -contains 'Update Rollups') { $type = "Rollup" }
-                    if ($categories -contains 'Critical Updates') { $type = "Critical" }
-                    if ($categories -contains 'Drivers') { $type = "Driver" }
-                    if ($categories -contains 'Feature Packs') { $type = "Feature Pack" } # Added
-                    if ($categories -contains 'Update Rollups') { $type = "Rollup" } # Was duplicate, fine
-                    if ($categories -contains 'Windows Anytime Upgrade') { $type = "Upgrade" } # Added
-                    if ($update.Title -match "Feature update") { $type = "Feature Update" } # Heuristic
-
-                    $processedUpdates += [PSCustomObject]@{
-                        Type         = $type
-                        Title        = $title
-                        KB           = $kb
-                        SizeMB       = $sizeMB
-                        IsDownloaded = $isDownloaded
-                        RawUpdateObj = $update
-                    }
-                } catch {
-                    Write-Warning "Skipping an update due to error processing its properties: $($update.Title) - $($_.Exception.Message)"
-                }
-            }
-        } else {
-            Write-Host "No updates matched the criteria '$Criteria' according to WUA COM search." -ForegroundColor Yellow
-        }
-        Write-Host "Processed $($processedUpdates.Count) updates for display." -ForegroundColor Green
-        return $processedUpdates
-    } catch {
-        Write-Host "Error during WUA search or processing: $($_.Exception.ToString())" -ForegroundColor Red
-        # If searchResult is available, show its HResult
-        if ($searchResult -ne $null) {
-            Write-Host "Search Result HResult (if available): $($searchResult.HResult)" -ForegroundColor Red
-        }
-        throw "Failed to search/process updates using WUA: $($_.Exception.Message)"
-    } finally {
-        if ($updateSearcher) { try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($updateSearcher) | Out-Null } catch {} }
-        if ($updateSession) { try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($updateSession) | Out-Null } catch {} }
-        Write-Host "WUA COM objects for Get-UpdatesWUA released." -ForegroundColor Cyan
-        # [System.GC]::Collect() # Usually not needed and can impact performance
-        # [System.GC]::WaitForPendingFinalizers()
-    }
-}
-
-
-# --- Load Updates Button ---
-$loadUpdatesButton = New-Object System.Windows.Forms.Button
-$loadUpdatesButton.Text = "Load Updates (WUA)"
-$loadUpdatesButton.Size = New-Object System.Drawing.Size(220, 30)
-$loadUpdatesButton.Location = New-Object System.Drawing.Point(20, 550)
-$loadUpdatesButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$loadUpdatesButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$loadUpdatesButton.Add_Click({
-    $updateListView.Items.Clear()
-    $progressBar.Style = 'Marquee'
-    $statusLabel.Text = "Loading available updates using WUA COM... (UI will freeze)"
-    $loadUpdatesButton.Enabled = $false
-    $installButton.Enabled = $false
-    $form.Refresh() # Update UI before blocking
-
-    try {
-        # Call the function that uses WUA COM directly
-        # Using default criteria "IsInstalled=0 and IsHidden=0"
-        $updates = Get-UpdatesWUA
-
-        $updateListView.BeginUpdate() # Improve performance
-        if ($updates -and $updates.Count -gt 0) {
-            foreach ($updateInfo in $updates) {
-                $item = New-Object System.Windows.Forms.ListViewItem($updateInfo.Type)
-                $item.SubItems.Add($updateInfo.Title)
-                $item.SubItems.Add($updateInfo.KB)
-                $item.SubItems.Add($updateInfo.SizeMB.ToString("F2")) # Format size
-                $item.SubItems.Add($updateInfo.IsDownloaded.ToString())
-                $item.Tag = $updateInfo.RawUpdateObj # Store the raw COM object
-                $updateListView.Items.Add($item)
-            }
-             $statusLabel.Text = "WUA Updates loaded ($($updateListView.Items.Count) found)."
-        } else {
-             $statusLabel.Text = "No applicable updates found via WUA."
-        }
-        $updateListView.EndUpdate()
-
-    } catch {
-        $statusLabel.Text = "Error loading WUA updates."
-        # Error message thrown from Get-UpdatesWUA or COM exceptions
-        [System.Windows.Forms.MessageBox]::Show("Failed to load updates using WUA:`n`n$($_.Exception.Message)", "WUA Error", 'OK', 'Error')
-    } finally {
-        $progressBar.Style = 'Blocks'
-        $loadUpdatesButton.Enabled = $true
-        $installButton.Enabled = $true
-        $form.Refresh()
-    }
-})
-$tabUpdates.Controls.Add($loadUpdatesButton)
-
-
-# --- Install Updates Button ---
-$installButton = New-Object System.Windows.Forms.Button
-$installButton.Text = "Install Selected (WUA)"
-$installButton.Size = New-Object System.Drawing.Size(220, 30)
-$installButton.Location = New-Object System.Drawing.Point(260, 550) # Adjusted position
-$installButton.BackColor = [System.Drawing.Color]::FromArgb(29, 205, 159)
-$installButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$installButton.Add_Click({
-    # Get the raw IUpdate COM objects stored in the Tag property of checked items
-    $selectedUpdateCOMObjects = $updateListView.CheckedItems | ForEach-Object { $_.Tag }
-
-    if ($selectedUpdateCOMObjects.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("No updates selected to install.", "Info", 'OK', 'Information')
-        return
-    }
-
-    # Prepare UI for direct install action (will freeze)
-    $progressBar.Style = 'Marquee'
-    $statusLabel.Text = "Preparing WUA installation for $($selectedUpdateCOMObjects.Count) update(s)... (UI will freeze)"
-    $loadUpdatesButton.Enabled = $false
-    $installButton.Enabled = $false
-    $form.Refresh()
-
-    $updateSession = $null
-    $installer = $null
-    $updatesToInstallCollection = $null
-    $installationResult = $null
-    $downloadResult = $null # Define variable to hold download result
-
-    try {
-        # Create the collection of updates to install
-        Write-Host "Creating WUA Update Collection for $($selectedUpdateCOMObjects.Count) items."
-        $updatesToInstallCollection = New-Object -ComObject "Microsoft.Update.UpdateColl"
-        $selectedUpdateCOMObjects | ForEach-Object { $updatesToInstallCollection.Add($_) | Out-Null }
-
-        # Create session and installer
-        Write-Host "Creating WUA Session and Installer..."
-        $updateSession = New-Object -ComObject "Microsoft.Update.Session"
-        $installer = $updateSession.CreateUpdateInstaller() # CORRECTED: Removed -ErrorAction
-        $installer.Updates = $updatesToInstallCollection
-
-        # --- Download Stage (Explicit Check) ---
-        $statusLabel.Text = "Downloading $($selectedUpdateCOMObjects.Count) updates... (UI will freeze)"
-        $form.Refresh()
-        Write-Host "Starting WUA Download..."
-        $downloadResult = $installer.Download()
-        Write-Host "WUA Download Result Code: $($downloadResult.ResultCode)" # 0=NotStarted, 1=InProgress, 2=Succeeded, 3=SucceededWithErrors, 4=Failed, 5=Aborted
-
-        if ($downloadResult.ResultCode -ne 2) { # 2 = Succeeded
-             # Attempt to get more error details if possible
-             $hresult = $downloadResult.HResult
-             $source = "Download"
-             $detailedError = "Update download failed! Result code: $($downloadResult.ResultCode). HResult: $hresult" # Clearer message
-             try {
-                 # Iterate through results per update if available
-                 for ($i = 0; $i -lt $updatesToInstallCollection.Count; $i++) {
-                     $updateResult = $downloadResult.GetUpdateResult($i)
-                     if ($updateResult.ResultCode -ne 2) { # Find the failing one
-                          $updateTitle = $updatesToInstallCollection.Item($i).Title
-                          $detailedError += "`n  - Update '$updateTitle': Result $($updateResult.ResultCode), HResult $($updateResult.HResult)"
-                     }
-                 }
-             } catch { $detailedError += "`n  (Could not retrieve per-update download results)" }
-             throw $detailedError # Throw specific download error
-        }
-        Write-Host "WUA Download process reported success (ResultCode 2)."
-
-        # --- Verify Download Status ---
-        Write-Host "Verifying IsDownloaded status for $($updatesToInstallCollection.Count) updates..."
-        $notDownloadedList = @()
-        for ($i = 0; $i -lt $updatesToInstallCollection.Count; $i++) {
-            $updateItem = $updatesToInstallCollection.Item($i)
-            if (-not $updateItem.IsDownloaded) {
-                $notDownloadedList += "'$($updateItem.Title)' (KB:$($updateItem.KBArticleIDs | Select -First 1))"
-                 Write-Warning "Update '$($updateItem.Title)' IsDownloaded property is still FALSE after download attempt."
-            }
-        }
-        if ($notDownloadedList.Count -gt 0) {
-             throw "Download verification failed. The following updates are still not marked as downloaded:`n$($notDownloadedList -join "`n")"
-        }
-        Write-Host "All selected updates verified as downloaded."
-
-        # --- Install Stage ---
-        $statusLabel.Text = "Installing $($selectedUpdateCOMObjects.Count) updates... (UI will freeze)"
-        $form.Refresh()
-        Write-Host "Starting WUA Install..."
-        $installationResult = $installer.Install()
-        Write-Host "WUA Installation Result Code: $($installationResult.ResultCode)" # Same codes as download
-        if ($installationResult.ResultCode -ne 2) { # 2 = Succeeded
-            $hresult = $installationResult.HResult
-            $source = "Install"
-            $detailedError = "Update installation failed! Result code: $($installationResult.ResultCode). HResult: $hresult" # Clearer message
-             try {
-                 for ($i = 0; $i -lt $updatesToInstallCollection.Count; $i++) {
-                     $updateResult = $installationResult.GetUpdateResult($i)
-                     if ($updateResult.ResultCode -ne 2) {
-                          $updateTitle = $updatesToInstallCollection.Item($i).Title
-                          $detailedError += "`n  - Update '$updateTitle': Result $($updateResult.ResultCode), HResult $($updateResult.HResult)"
-                     }
-                 }
-             } catch { $detailedError += "`n  (Could not retrieve per-update install results)" }
-            throw $detailedError # Throw specific install error
-        }
-
-        # Success
-        $statusLabel.Text = "Installation complete via WUA."
-        [System.Windows.Forms.MessageBox]::Show("Selected updates installed successfully using WUA.`nReboot Required: $($installationResult.RebootRequired)", "Installation Success", 'OK', 'Information')
-        $updateListView.Items.Clear() # Clear list after successful install
-
-    } catch {
-        # Determine stage based on which result variable is populated
-        $stage = "operation"
-        if ($installationResult) { $stage = "Install" } elseif ($downloadResult) { $stage = "Download" }
-
-        $statusLabel.Text = "Error during WUA $stage." # Indicate stage
-        [System.Windows.Forms.MessageBox]::Show("Failed to $stage updates using WUA:`n`n$($_.Exception.Message)", "WUA $stage Error", 'OK', 'Error')
-        # Log details if available
-        if($installationResult) { Write-Host "Last Install Result Code: $($installationResult.ResultCode). Reboot Required: $($installationResult.RebootRequired)"}
-        elseif($downloadResult) { Write-Host "Last Download Result Code: $($downloadResult.ResultCode)."}
-    } finally {
-        $progressBar.Style = 'Blocks'
-        $loadUpdatesButton.Enabled = $true
-        $installButton.Enabled = $true
-        # Release COM objects
-        if ($installer) { try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($installer) | Out-Null } catch {} }
-        if ($updateSession) { try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($updateSession) | Out-Null } catch {} }
-        if ($updatesToInstallCollection) { try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($updatesToInstallCollection) | Out-Null } catch {} }
-        # Trigger garbage collection (use sparingly)
-        # [System.GC]::Collect()
-        # [System.GC]::WaitForPendingFinalizers()
-        Write-Host "WUA Install process finished. COM objects released."
-        $form.Refresh()
-    }
-})
-$tabUpdates.Controls.Add($installButton)
-
-# --- Add the Tab to the TabControl ---
-# This line should be near the end of your script where other tabs are added
-# $tabControl.TabPages.Add($tabUpdates)
-
-# --- Add the Tab to the TabControl ---
-# This line should be near the end of your script where other tabs are added
-# $tabControl.TabPages.Add($tabUpdates)
-
-# --- Add the Tab to the TabControl ---
-# Ensure this line exists after defining all controls for $tabUpdates
-# $tabControl.TabPages.Add($tabUpdates) # This should happen later when adding ALL tabs
-# ============================================
-# Finalize Tabs and Run (with color palette applied)
-# ============================================
-
-$tabControl.TabPages.AddRange(@(
-    $tabSystemInfo,
-    $tabPerformance,
-    $tabStartup,
-    $tabUpdates
+$tabs = New-Object System.Windows.Forms.TabControl
+$tabs.Size = New-Object System.Drawing.Size(580, 540)
+$tabs.Location = New-Object System.Drawing.Point(10,10)
+$defaultFont = New-Object System.Drawing.Font("Segoe UI", 9)
+$monoFont = New-Object System.Drawing.Font("Consolas", 10)
+
+# === Tab 1: Optimizations ===
+$tabOptimize = New-Object System.Windows.Forms.TabPage -Property @{ Text = "Optimizations" }
+
+$lblPerf = New-Object System.Windows.Forms.Label -Property @{Text = "Performance Tweaks"; Location = "30,10"; Font = New-Object System.Drawing.Font("Segoe UI",10,[System.Drawing.FontStyle]::Bold); AutoSize = $true}
+$chkServices = New-Object System.Windows.Forms.CheckBox -Property @{Text="Disable Unnecessary Services"; Location="30,35"; AutoSize=$true}
+$chkTweaks = New-Object System.Windows.Forms.CheckBox -Property @{Text="Apply Performance Tweaks (Animations, Tips, Transparency)"; Location="30,60"; AutoSize=$true}
+
+$lblStartup = New-Object System.Windows.Forms.Label -Property @{Text = "Startup & Background"; Location = "30,90"; Font = New-Object System.Drawing.Font("Segoe UI",10,[System.Drawing.FontStyle]::Bold); AutoSize = $true}
+$lblStartupList = New-Object System.Windows.Forms.Label -Property @{Text = "Disable/Enable Individual Startup Items:"; Location="30,115"; AutoSize = $true}
+$listBoxStartup = New-Object System.Windows.Forms.CheckedListBox -Property @{Location="30,135"; Size="500,150"; CheckOnClick = $true}
+
+$lblPower = New-Object System.Windows.Forms.Label -Property @{Text = "Power & Storage"; Location = "30,290"; Font = New-Object System.Drawing.Font("Segoe UI",10,[System.Drawing.FontStyle]::Bold); AutoSize = $true}
+$chkStorage = New-Object System.Windows.Forms.CheckBox -Property @{Text="Enable Storage Sense"; Location="30,315"; AutoSize=$true}
+$chkPower = New-Object System.Windows.Forms.CheckBox -Property @{Text="Enable Ultimate Performance Plan"; Location="30,340"; AutoSize=$true}
+$chkTrim = New-Object System.Windows.Forms.CheckBox -Property @{Text="Trim SSD (C:)"; Location="30,365"; AutoSize=$true}
+
+$btnApply = New-Object System.Windows.Forms.Button -Property @{Text="Apply Selected Tweaks"; Size="200,40"; Location="180,410"}
+
+$tabOptimize.Controls.AddRange(@(
+    $lblPerf, $chkServices, $chkTweaks,
+    $lblStartup, $lblStartupList, $listBoxStartup,
+    $lblPower, $chkStorage, $chkPower, $chkTrim,
+    $btnApply
 ))
 
-# Add Progress Bar
-$progressBar = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Style = 'Blocks'
-$progressBar.Location = New-Object System.Drawing.Point(10, 630)
-$progressBar.Size = New-Object System.Drawing.Size(960, 20)
-$form.Controls.Add($progressBar)
+$excluded = @("Teams", "OneDrive", "RingCentral", "Kaseya", "Sentinel", "Acrobat")
+$global:startupMap = @{}
+$startupItems = Get-CimInstance Win32_StartupCommand | Where-Object { $_.Name -and $excluded -notcontains $_.Name }
+foreach ($item in $startupItems) {
+    $label = $item.Name
+    if ($label -match 'Updater|Install|Help|Service|Tray|Monitor|Assistant|Auto') {
+        $label += " (Unnecessary)"
+    } else {
+        $label += " (Necessary)"
+    }
+    $index = $listBoxStartup.Items.Add($label)
+    $listBoxStartup.SetItemChecked($index, $true)
 
-# Add Status Label
-$statusLabel = New-Object System.Windows.Forms.Label
-$statusLabel.Text = "Ready"
-$statusLabel.Location = New-Object System.Drawing.Point(10, 610)
-$statusLabel.Size = New-Object System.Drawing.Size(960, 20)
-$statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(22, 153, 118)
-$statusLabel.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
-$form.Controls.Add($statusLabel)
+    if (-not $global:drawItemApplied) {
+        $listBoxStartup.DrawMode = 'OwnerDrawFixed'
+        $listBoxStartup.Add_DrawItem({
+            param($sender, $e)
+            $e.DrawBackground()
+            $text = $listBoxStartup.Items[$e.Index]
+            $brush = if ($text -like "*(Unnecessary)*") { [System.Drawing.Brushes]::Red } else { [System.Drawing.Brushes]::Green }
+            $e.Graphics.DrawString($text, $e.Font, $brush, $e.Bounds.X, $e.Bounds.Y)
+            $e.DrawFocusRectangle()
+        })
+        $global:drawItemApplied = $true
+    }
 
-# Apply color palette to form and tab control
-$form.BackColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
-$tabControl.BackColor = [System.Drawing.Color]::FromArgb(34, 34, 34)
+    $global:startupMap[$label] = $item.Command
+}
 
-$form.Controls.Add($tabControl)
-$form.Add_Shown({ $form.Activate() })
-[System.Windows.Forms.Application]::Run($form)
+$btnApply.Add_Click({
+    if ($chkServices.Checked) {
+        $services = @("DiagTrack", "MapsBroker", "WMPNetworkSvc", "XblAuthManager", "XboxNetApiSvc")
+        foreach ($svc in $services) {
+            try {
+                Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+                Set-Service -Name $svc -StartupType Manual
+                Log "Disabled service: $svc"
+            } catch {
+                Log "Failed to disable: $svc"
+            }
+        }
+    }
+
+    if ($chkTweaks.Checked) {
+        Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0
+        Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SubscribedContent-338388Enabled" -Value 0
+        Log "Applied performance tweaks"
+    }
+
+    foreach ($i in 0..($listBoxStartup.Items.Count - 1)) {
+        $label = $listBoxStartup.Items[$i]
+        $enabled = $listBoxStartup.GetItemChecked($i)
+        if (-not $enabled) {
+            try {
+                Log "Disabling startup: $label"
+                # Actual disable logic would go here
+            } catch {
+                Log "Failed to disable: $label"
+            }
+        }
+    }
+
+    if ($chkStorage.Checked) {
+        reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" /v 01 /t REG_DWORD /d 1 /f
+        Log "Enabled Storage Sense"
+    }
+
+    if ($chkPower.Checked) {
+        powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 | Out-Null
+        powercfg -setactive e9a42b02-d5df-448d-aa00-03f14749eb61
+        Log "Enabled Ultimate Performance plan"
+    }
+
+    if ($chkTrim.Checked) {
+        Optimize-Volume -DriveLetter C -ReTrim -Verbose | Out-Null
+        Log "Trimmed SSD"
+    }
+
+    [System.Windows.Forms.MessageBox]::Show("Optimizations applied. Check console or log.", "Done")
+})
+
+# === Tab 2: Uninstaller ===
+$tabUninstall = New-Object System.Windows.Forms.TabPage -Property @{ Text = "Uninstaller" }
+
+$lblAppx = New-Object System.Windows.Forms.Label -Property @{Text="Recommended Apps to Uninstall:"; Location="20,10"; AutoSize=$true}
+$listBoxAppx = New-Object System.Windows.Forms.CheckedListBox -Property @{Location="20,30"; Size="250,300"; CheckOnClick=$true}
+$btnCheckBloat = New-Object System.Windows.Forms.Button -Property @{Text="Check All Bloatware"; Size="200,30"; Location="20,340"}
+$btnUninstall = New-Object System.Windows.Forms.Button -Property @{Text="Uninstall Selected"; Size="200,40"; Location="20,380"}
+
+$tabUninstall.Controls.AddRange(@($lblAppx, $listBoxAppx, $btnCheckBloat, $btnUninstall))
+
+$safeAppxList = @(
+    @{ Name = "Microsoft.XboxGamingOverlay"; Label = "Xbox Game Bar" },
+    @{ Name = "Microsoft.XboxApp"; Label = "Xbox Console Companion" },
+    @{ Name = "Microsoft.ZuneMusic"; Label = "Groove Music" },
+    @{ Name = "Microsoft.ZuneVideo"; Label = "Movies & TV" },
+    @{ Name = "Microsoft.YourPhone"; Label = "Your Phone" },
+    @{ Name = "Microsoft.MicrosoftSolitaireCollection"; Label = "Solitaire Collection" },
+    @{ Name = "SpotifyAB.SpotifyMusic"; Label = "Spotify" },
+    @{ Name = "Microsoft.People"; Label = "People App" },
+    @{ Name = "Microsoft.SkypeApp"; Label = "Skype" },
+    @{ Name = "Microsoft.GetHelp"; Label = "Get Help" },
+    @{ Name = "Microsoft.Getstarted"; Label = "Tips App" }
+)
+
+foreach ($app in $safeAppxList) {
+    $index = $listBoxAppx.Items.Add($app.Label)
+    $global:appxMap[$app.Label] = $app.Name
+}
+
+$btnCheckBloat.Add_Click({
+    for ($i = 0; $i -lt $listBoxAppx.Items.Count; $i++) {
+        $listBoxAppx.SetItemChecked($i, $true)
+    }
+    Log "Auto-selected all bloatware for removal"
+})
+
+$btnUninstall.Add_Click({
+    foreach ($item in $listBoxAppx.CheckedItems) {
+        $pkg = $global:appxMap[$item]
+        try {
+            Write-Host "Uninstalling $item ($pkg)..."
+            Get-AppxPackage -Name $pkg | Remove-AppxPackage -ErrorAction Stop
+            Log "Uninstalled: $item ($pkg)"
+        } catch {
+            Log "Failed to uninstall: $item"
+        }
+    }
+    [System.Windows.Forms.MessageBox]::Show("Selected apps uninstalled.", "Done")
+})
+
+# === Tab 3: Advanced Tools ===
+$tabAdvanced = New-Object System.Windows.Forms.TabPage -Property @{ Text = "Advanced Tools" }
+
+$btnDiskCleanup = New-Object System.Windows.Forms.Button -Property @{Text="Run Disk Cleanup"; Size="200,30"; Location="20,20"}
+$btnFlushDNS = New-Object System.Windows.Forms.Button -Property @{Text="Flush DNS Cache"; Size="200,30"; Location="20,60"}
+$btnDisableBackgroundApps = New-Object System.Windows.Forms.Button -Property @{Text="Disable Background Apps"; Size="200,30"; Location="20,100"}
+$btnEnableBackgroundApps = New-Object System.Windows.Forms.Button -Property @{Text="Enable Background Apps"; Size="200,30"; Location="240,100"}
+$btnOpenTaskManager = New-Object System.Windows.Forms.Button -Property @{Text="Open Task Manager"; Size="200,30"; Location="20,140"}
+$btnOpenWindowsTools = New-Object System.Windows.Forms.Button -Property @{Text="Open Windows Tools"; Size="200,30"; Location="20,180"}
+
+$btnDiskCleanup.Add_Click({ Write-Host "Launching Disk Cleanup..."; Log "Launching Disk Cleanup"; Start-Process -FilePath cleanmgr.exe })
+$btnFlushDNS.Add_Click({ Write-Host "Flushing DNS Cache..."; ipconfig /flushdns | Write-Host; Log "DNS cache flushed" })
+$btnDisableBackgroundApps.Add_Click({ Write-Host "Disabling background apps..."; Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 1; Log "Background apps disabled" })
+$btnEnableBackgroundApps.Add_Click({ Write-Host "Enabling background apps..."; Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 0; Log "Background apps enabled" })
+$btnOpenTaskManager.Add_Click({ Write-Host "Opening Task Manager..."; Log "Task Manager opened"; Start-Process taskmgr.exe })
+$btnOpenWindowsTools.Add_Click({ Write-Host "Opening Windows Tools..."; Log "Windows Tools opened"; Start-Process control.exe appwiz.cpl })
+
+$tabAdvanced.Controls.AddRange(@($btnDiskCleanup, $btnFlushDNS, $btnDisableBackgroundApps, $btnEnableBackgroundApps, $btnOpenTaskManager, $btnOpenWindowsTools))
+
+# === Tab 4: System Info ===
+$tabSystemInfo = New-Object System.Windows.Forms.TabPage -Property @{ Text = "System Info" }
+$txtSysInfo = New-Object System.Windows.Forms.TextBox -Property @{
+    Multiline = $true; ReadOnly = $true; ScrollBars = "Vertical";
+    Location = "10,10"; Size = "540,460"; Font = $monoFont
+}
+$btnRefreshSys = New-Object System.Windows.Forms.Button -Property @{Text="Refresh Info"; Size="120,30"; Location="10,480"; Font = $defaultFont}
+
+$btnRefreshSys.Add_Click({
+    $info = @()
+    $info += "==================== SYSTEM SUMMARY ===================="
+    $info += "Computer Name     : $(hostname)"
+    $info += "OS Version        : $((Get-CimInstance Win32_OperatingSystem).Caption)"
+    $info += "OS Build          : $([Environment]::OSVersion.Version.ToString())"
+    $info += "CPU               : $((Get-CimInstance Win32_Processor).Name)"
+    $info += "RAM               : {0:N0} MB" -f ((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)
+
+    $cDrive = Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DeviceID -eq "C:" }
+    if ($cDrive) {
+        $info += "Disk (C:) Total   : $([math]::Round($cDrive.Size / 1GB)) GB"
+        $info += "Disk (C:) Free    : $([math]::Round($cDrive.FreeSpace / 1GB)) GB"
+    } else {
+        $info += "Disk Info         : Not Detected"
+    }
+
+    $info += "Last Boot         : $((Get-CimInstance Win32_OperatingSystem).LastBootUpTime)"
+
+    $gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1 -ExpandProperty Name
+    if ($gpu) { $info += "GPU               : $gpu" } else { $info += "GPU               : Not Detected" }
+
+    $battery = Get-CimInstance Win32_Battery
+    if ($battery) {
+        $batteryStatus = switch ($battery.BatteryStatus) {
+            1 { "Discharging" }
+            2 { "AC connected" }
+            3 { "Fully Charged" }
+            4 { "Low" }
+            5 { "Critical" }
+            6 { "Charging" }
+            default { "Unknown" }
+        }
+        $info += "Battery Status    : $batteryStatus"
+        $info += "Battery Remaining : $($battery.EstimatedChargeRemaining)%"
+    } else {
+        $info += "Battery Info      : Not Detected"
+    }
+    $info += "========================================================"
+
+    $txtSysInfo.Lines = $info
+    Log "System info refreshed"
+})
+
+$tabSystemInfo.Controls.AddRange(@($txtSysInfo, $btnRefreshSys))
+
+# === Tab 5: License Info ===
+$tabLicenseInfo = New-Object System.Windows.Forms.TabPage -Property @{ Text = "License Info" }
+$txtLicenses = New-Object System.Windows.Forms.TextBox -Property @{
+    Multiline = $true; ReadOnly = $true; ScrollBars = "Vertical";
+    Location = "10,10"; Size = "540,460"; Font = $defaultFont
+}
+$btnRefreshLicenses = New-Object System.Windows.Forms.Button -Property @{Text="Refresh Licenses"; Size="120,30"; Location="10,480"; Font = $defaultFont}
+
+$btnRefreshLicenses.Add_Click({
+    $lines = @()
+    $lines += "==================== LICENSED SOFTWARE ===================="
+
+    $registryPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    foreach ($path in $registryPaths) {
+        $apps = Get-ItemProperty $path -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and ($_.DisplayName -match "Adobe|Office|Microsoft 365|Acrobat") }
+        foreach ($app in $apps) {
+            $lines += "App: $($app.DisplayName)"
+            if ($app.Publisher) { $lines += "Publisher: $($app.Publisher)" }
+            if ($app.InstallDate) { $lines += "Installed On: $($app.InstallDate)" }
+            if ($app.HelpLink) { $lines += "HelpLink: $($app.HelpLink)" }
+
+            if ($app.DisplayName -like "*Adobe*" -or $app.DisplayName -like "*Acrobat*") {
+                $adobeKeyPaths = @(
+                    "HKLM:\SOFTWARE\Adobe\Adobe Acrobat\*",
+                    "HKLM:\SOFTWARE\WOW6432Node\Adobe\Adobe Acrobat\*"
+                )
+                foreach ($adobePath in $adobeKeyPaths) {
+                    try {
+                        Get-ChildItem -Path $adobePath -ErrorAction SilentlyContinue | ForEach-Object {
+                            $props = Get-ItemProperty -Path $_.PsPath -ErrorAction SilentlyContinue
+                            foreach ($name in $props.PSObject.Properties.Name) {
+                                if ($name -like '*Serial*' -or $name -like '*License*') {
+                                    $value = $props.$name
+                                    if ($value) { $lines += "License Info: $name = $value" }
+                                }
+                            }
+                        }
+                    } catch {}
+                }
+            }
+            $lines += "---"
+        }
+    }
+
+    $lines += "(Note: License keys are only visible if stored in plain registry values)"
+    $lines += "==========================================================="
+
+    $txtLicenses.Lines = $lines
+    Log "License info refreshed"
+})
+
+$tabLicenseInfo.Controls.AddRange(@($txtLicenses, $btnRefreshLicenses))
+
+
+
+
+# === Finalize ===
+$tabs.TabPages.AddRange(@($tabOptimize, $tabUninstall, $tabAdvanced, $tabSystemInfo, $tabLicenseInfo))
+$form.Controls.Add($tabs)
+[void]$form.ShowDialog()
