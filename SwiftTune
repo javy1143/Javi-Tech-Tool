@@ -1,12 +1,25 @@
+# === Admin Check ===
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    [System.Windows.Forms.MessageBox]::Show("This script requires administrative privileges. Please run as Administrator.", "Error", "OK", "Error")
+    exit
+}
+
+# === Load Assemblies ===
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # === Logging ===
 $logPath = "$env:ProgramData\DellWin11Optimizer.log"
-function Log { param($msg) Write-Host $msg; Add-Content -Path $logPath -Value "$(Get-Date -Format u): $msg" }
+function Log { 
+    param($msg)
+    Write-Debug $msg
+    Write-Host $msg
+    Add-Content -Path $logPath -Value "$(Get-Date -Format u): $msg" -ErrorAction SilentlyContinue
+}
 
 # === Mappings ===
 $global:appxMap = @{}
+$global:startupMap = @{}
 $excludeList = @("Teams", "OneDrive", "Outlook", "Edge", "Chrome", "RingCentral", "Kaseya", "Sentinel", "Acrobat", "Microsoft 365", "Office", "Visual C++", "Driver", "Intel")
 
 # === Form Setup ===
@@ -17,27 +30,27 @@ $form.StartPosition = "CenterScreen"
 
 $tabs = New-Object System.Windows.Forms.TabControl
 $tabs.Size = New-Object System.Drawing.Size(580, 540)
-$tabs.Location = New-Object System.Drawing.Point(10,10)
+$tabs.Location = New-Object System.Drawing.Point(10, 10)
 $defaultFont = New-Object System.Drawing.Font("Segoe UI", 9)
 $monoFont = New-Object System.Drawing.Font("Consolas", 10)
 
 # === Tab 1: Optimizations ===
 $tabOptimize = New-Object System.Windows.Forms.TabPage -Property @{ Text = "Optimizations" }
 
-$lblPerf = New-Object System.Windows.Forms.Label -Property @{Text = "Performance Tweaks"; Location = "30,10"; Font = New-Object System.Drawing.Font("Segoe UI",10,[System.Drawing.FontStyle]::Bold); AutoSize = $true}
-$chkServices = New-Object System.Windows.Forms.CheckBox -Property @{Text="Disable Unnecessary Services"; Location="30,35"; AutoSize=$true}
-$chkTweaks = New-Object System.Windows.Forms.CheckBox -Property @{Text="Apply Performance Tweaks (Animations, Tips, Transparency)"; Location="30,60"; AutoSize=$true}
+$lblPerf = New-Object System.Windows.Forms.Label -Property @{ Text = "Performance Tweaks"; Location = "30,10"; Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold); AutoSize = $true }
+$chkServices = New-Object System.Windows.Forms.CheckBox -Property @{ Text = "Disable Unnecessary Services"; Location = "30,35"; AutoSize = $true }
+$chkTweaks = New-Object System.Windows.Forms.CheckBox -Property @{ Text = "Apply Performance Tweaks (Animations, Tips, Transparency)"; Location = "30,60"; AutoSize = $true }
 
-$lblStartup = New-Object System.Windows.Forms.Label -Property @{Text = "Startup & Background"; Location = "30,90"; Font = New-Object System.Drawing.Font("Segoe UI",10,[System.Drawing.FontStyle]::Bold); AutoSize = $true}
-$lblStartupList = New-Object System.Windows.Forms.Label -Property @{Text = "Disable/Enable Individual Startup Items:"; Location="30,115"; AutoSize = $true}
-$listBoxStartup = New-Object System.Windows.Forms.CheckedListBox -Property @{Location="30,135"; Size="500,150"; CheckOnClick = $true}
+$lblStartup = New-Object System.Windows.Forms.Label -Property @{ Text = "Startup & Background"; Location = "30,90"; Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold); AutoSize = $true }
+$lblStartupList = New-Object System.Windows.Forms.Label -Property @{ Text = "Disable/Enable Individual Startup Items:"; Location = "30,115"; AutoSize = $true }
+$listBoxStartup = New-Object System.Windows.Forms.CheckedListBox -Property @{ Location = "30,135"; Size = "500,150"; CheckOnClick = $true }
 
-$lblPower = New-Object System.Windows.Forms.Label -Property @{Text = "Power & Storage"; Location = "30,290"; Font = New-Object System.Drawing.Font("Segoe UI",10,[System.Drawing.FontStyle]::Bold); AutoSize = $true}
-$chkStorage = New-Object System.Windows.Forms.CheckBox -Property @{Text="Enable Storage Sense"; Location="30,315"; AutoSize=$true}
-$chkPower = New-Object System.Windows.Forms.CheckBox -Property @{Text="Enable Ultimate Performance Plan"; Location="30,340"; AutoSize=$true}
-$chkTrim = New-Object System.Windows.Forms.CheckBox -Property @{Text="Trim SSD (C:)"; Location="30,365"; AutoSize=$true}
+$lblPower = New-Object System.Windows.Forms.Label -Property @{ Text = "Power & Storage"; Location = "30,290"; Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold); AutoSize = $true }
+$chkStorage = New-Object System.Windows.Forms.CheckBox -Property @{ Text = "Enable Storage Sense"; Location = "30,315"; AutoSize = $true }
+$chkPower = New-Object System.Windows.Forms.CheckBox -Property @{ Text = "Enable Ultimate Performance Plan"; Location = "30,340"; AutoSize = $true }
+$chkTrim = New-Object System.Windows.Forms.CheckBox -Property @{ Text = "Trim SSD (C:)"; Location = "30,365"; AutoSize = $true }
 
-$btnApply = New-Object System.Windows.Forms.Button -Property @{Text="Apply Selected Tweaks"; Size="200,40"; Location="180,410"}
+$btnApply = New-Object System.Windows.Forms.Button -Property @{ Text = "Apply Selected Tweaks"; Size = "200,40"; Location = "180,410" }
 
 $tabOptimize.Controls.AddRange(@(
     $lblPerf, $chkServices, $chkTweaks,
@@ -46,9 +59,8 @@ $tabOptimize.Controls.AddRange(@(
     $btnApply
 ))
 
-$excluded = @("Teams", "OneDrive", "RingCentral", "Kaseya", "Sentinel", "Acrobat")
-$global:startupMap = @{}
-$startupItems = Get-CimInstance Win32_StartupCommand | Where-Object { $_.Name -and $excluded -notcontains $_.Name }
+# Populate Startup Items
+$startupItems = Get-CimInstance Win32_StartupCommand | Where-Object { $_.Name -and $excludeList -notcontains $_.Name }
 foreach ($item in $startupItems) {
     $label = $item.Name
     if ($label -match 'Updater|Install|Help|Service|Tray|Monitor|Assistant|Auto') {
@@ -58,41 +70,58 @@ foreach ($item in $startupItems) {
     }
     $index = $listBoxStartup.Items.Add($label)
     $listBoxStartup.SetItemChecked($index, $true)
+    $global:startupMap[$label] = $item
+}
 
-    if (-not $global:drawItemApplied) {
-        $listBoxStartup.DrawMode = 'OwnerDrawFixed'
-        $listBoxStartup.Add_DrawItem({
-            param($sender, $e)
-            $e.DrawBackground()
-            $text = $listBoxStartup.Items[$e.Index]
-            $brush = if ($text -like "*(Unnecessary)*") { [System.Drawing.Brushes]::Red } else { [System.Drawing.Brushes]::Green }
-            $e.Graphics.DrawString($text, $e.Font, $brush, $e.Bounds.X, $e.Bounds.Y)
-            $e.DrawFocusRectangle()
-        })
-        $global:drawItemApplied = $true
-    }
-
-    $global:startupMap[$label] = $item.Command
+if (-not $global:drawItemApplied) {
+    $listBoxStartup.DrawMode = 'OwnerDrawFixed'
+    $listBoxStartup.Add_DrawItem({
+        param($sender, $e)
+        $e.DrawBackground()
+        $text = $listBoxStartup.Items[$e.Index]
+        $brush = if ($text -like "*(Unnecessary)*") { [System.Drawing.Brushes]::Red } else { [System.Drawing.Brushes]::Green }
+        $e.Graphics.DrawString($text, $e.Font, $brush, $e.Bounds.X, $e.Bounds.Y)
+        $e.DrawFocusRectangle()
+    })
+    $global:drawItemApplied = $true
 }
 
 $btnApply.Add_Click({
+    $results = @()
+
     if ($chkServices.Checked) {
         $services = @("DiagTrack", "MapsBroker", "WMPNetworkSvc", "XblAuthManager", "XboxNetApiSvc")
         foreach ($svc in $services) {
             try {
-                Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
-                Set-Service -Name $svc -StartupType Manual
-                Log "Disabled service: $svc"
+                if (Get-Service -Name $svc -ErrorAction Stop) {
+                    Stop-Service -Name $svc -Force -ErrorAction Stop
+                    Set-Service -Name $svc -StartupType Disabled -ErrorAction Stop
+                    $status = (Get-Service -Name $svc).StartType
+                    Log "Disabled service: $svc (StartType: $status)"
+                    $results += "Disabled service: $svc"
+                } else {
+                    Log "Service not found: $svc"
+                    $results += "Service not found: $svc"
+                }
             } catch {
-                Log "Failed to disable: $svc"
+                Log "Failed to disable service ${svc}: $_"
+                $results += "Failed to disable service ${svc}: $_"
             }
         }
     }
 
     if ($chkTweaks.Checked) {
-        Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0
-        Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SubscribedContent-338388Enabled" -Value 0
-        Log "Applied performance tweaks"
+        try {
+            Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0 -ErrorAction Stop
+            Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SubscribedContent-338388Enabled" -Value 0 -ErrorAction Stop
+            Stop-Process -Name explorer -Force -ErrorAction Stop
+            Start-Process explorer
+            Log "Applied performance tweaks and restarted Explorer"
+            $results += "Applied performance tweaks"
+        } catch {
+            Log "Failed to apply performance tweaks: $_"
+            $results += "Failed to apply performance tweaks: $_"
+        }
     }
 
     foreach ($i in 0..($listBoxStartup.Items.Count - 1)) {
@@ -100,40 +129,88 @@ $btnApply.Add_Click({
         $enabled = $listBoxStartup.GetItemChecked($i)
         if (-not $enabled) {
             try {
-                Log "Disabling startup: $label"
-                # Actual disable logic would go here
+                $item = $global:startupMap[$label]
+                if ($item.Location -like "HKLM:*" -or $item.Location -like "HKCU:*") {
+                    Remove-ItemProperty -Path $item.Location -Name $item.Name -ErrorAction Stop
+                    Log "Disabled startup item: $label"
+                    $results += "Disabled startup item: $label"
+                } elseif ($item.Location -like "*Startup*") {
+                    Remove-Item -Path $item.Location -Force -ErrorAction Stop
+                    Log "Removed startup item from folder: $label"
+                    $results += "Removed startup item: $label"
+                } else {
+                    Log "Unsupported startup location for $label"
+                    $results += "Unsupported startup location for $label"
+                }
             } catch {
-                Log "Failed to disable: $label"
+                Log "Failed to disable startup item ${label}: $_"
+                $results += "Failed to disable startup item ${label}: $_"
             }
         }
     }
 
     if ($chkStorage.Checked) {
-        reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" /v 01 /t REG_DWORD /d 1 /f
-        Log "Enabled Storage Sense"
+        try {
+            $path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy"
+            if (-not (Test-Path $path)) { New-Item -Path $path -Force -ErrorAction Stop }
+            Set-ItemProperty -Path $path -Name 01 -Value 1 -Type DWord -ErrorAction Stop
+            $value = Get-ItemProperty -Path $path -Name 01
+            Log "Enabled Storage Sense: 01 = $($value.'01')"
+            $results += "Enabled Storage Sense"
+        } catch {
+            Log "Failed to enable Storage Sense: $_"
+            $results += "Failed to enable Storage Sense: $_"
+        }
     }
 
     if ($chkPower.Checked) {
-        powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 | Out-Null
-        powercfg -setactive e9a42b02-d5df-448d-aa00-03f14749eb61
-        Log "Enabled Ultimate Performance plan"
+        try {
+            $plan = powercfg -list | Select-String "e9a42b02-d5df-448d-aa00-03f14749eb61"
+            if (-not $plan) {
+                powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61
+            }
+            powercfg -setactive e9a42b02-d5df-448d-aa00-03f14749eb61
+            $active = powercfg -getactivescheme | Select-String "e9a42b02-d5df-448d-aa00-03f14749eb61"
+            if ($active) {
+                Log "Enabled Ultimate Performance plan"
+                $results += "Enabled Ultimate Performance plan"
+            } else {
+                Log "Failed to set Ultimate Performance plan"
+                $results += "Failed to set Ultimate Performance plan"
+            }
+        } catch {
+            Log "Failed to enable Ultimate Performance plan: $_"
+            $results += "Failed to enable Ultimate Performance plan: $_"
+        }
     }
 
     if ($chkTrim.Checked) {
-        Optimize-Volume -DriveLetter C -ReTrim -Verbose | Out-Null
-        Log "Trimmed SSD"
+        try {
+            $drive = Get-PhysicalDisk | Where-Object { $_.DeviceID -eq (Get-Partition -DriveLetter C).DiskNumber }
+            if ($drive -and $drive.MediaType -eq "SSD") {
+                Optimize-Volume -DriveLetter C -ReTrim -Verbose
+                Log "Trimmed SSD (C:)"
+                $results += "Trimmed SSD (C:)"
+            } else {
+                Log "Drive C: is not an SSD or not found"
+                $results += "Drive C: is not an SSD or not found"
+            }
+        } catch {
+            Log "Failed to trim SSD: $_"
+            $results += "Failed to trim SSD: $_"
+        }
     }
 
-    [System.Windows.Forms.MessageBox]::Show("Optimizations applied. Check console or log.", "Done")
+    [System.Windows.Forms.MessageBox]::Show(($results -join "`n"), "Optimization Results", "OK", "Information")
 })
 
 # === Tab 2: Uninstaller ===
 $tabUninstall = New-Object System.Windows.Forms.TabPage -Property @{ Text = "Uninstaller" }
 
-$lblAppx = New-Object System.Windows.Forms.Label -Property @{Text="Recommended Apps to Uninstall:"; Location="20,10"; AutoSize=$true}
-$listBoxAppx = New-Object System.Windows.Forms.CheckedListBox -Property @{Location="20,30"; Size="250,300"; CheckOnClick=$true}
-$btnCheckBloat = New-Object System.Windows.Forms.Button -Property @{Text="Check All Bloatware"; Size="200,30"; Location="20,340"}
-$btnUninstall = New-Object System.Windows.Forms.Button -Property @{Text="Uninstall Selected"; Size="200,40"; Location="20,380"}
+$lblAppx = New-Object System.Windows.Forms.Label -Property @{ Text = "Recommended Apps to Uninstall:"; Location = "20,10"; AutoSize = $true }
+$listBoxAppx = New-Object System.Windows.Forms.CheckedListBox -Property @{ Location = "20,30"; Size = "250,300"; CheckOnClick = $true }
+$btnCheckBloat = New-Object System.Windows.Forms.Button -Property @{ Text = "Check All Bloatware"; Size = "200,30"; Location = "20,340" }
+$btnUninstall = New-Object System.Windows.Forms.Button -Property @{ Text = "Uninstall Selected"; Size = "200,40"; Location = "20,380" }
 
 $tabUninstall.Controls.AddRange(@($lblAppx, $listBoxAppx, $btnCheckBloat, $btnUninstall))
 
@@ -164,37 +241,107 @@ $btnCheckBloat.Add_Click({
 })
 
 $btnUninstall.Add_Click({
+    $results = @()
     foreach ($item in $listBoxAppx.CheckedItems) {
         $pkg = $global:appxMap[$item]
         try {
             Write-Host "Uninstalling $item ($pkg)..."
-            Get-AppxPackage -Name $pkg | Remove-AppxPackage -ErrorAction Stop
-            Log "Uninstalled: $item ($pkg)"
+            $app = Get-AppxPackage -Name $pkg -AllUsers -ErrorAction Stop
+            if ($app) {
+                $app | Remove-AppxPackage -ErrorAction Stop
+                Log "Uninstalled $item ($pkg) for all users"
+                $results += "Uninstalled $item"
+            }
+            $provApp = Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq $pkg }
+            if ($provApp) {
+                $provApp | Remove-AppxProvisionedPackage -Online -ErrorAction Stop
+                Log "Removed provisioned package: $item ($pkg)"
+                $results += "Removed provisioned $item"
+            }
         } catch {
-            Log "Failed to uninstall: $item"
+            Log "Failed to uninstall ${item}: $_"
+            $results += "Failed to uninstall ${item}: $_"
         }
     }
-    [System.Windows.Forms.MessageBox]::Show("Selected apps uninstalled.", "Done")
+    [System.Windows.Forms.MessageBox]::Show(($results -join "`n"), "Uninstall Results", "OK", "Information")
 })
 
 # === Tab 3: Advanced Tools ===
 $tabAdvanced = New-Object System.Windows.Forms.TabPage -Property @{ Text = "Advanced Tools" }
 
-$btnDiskCleanup = New-Object System.Windows.Forms.Button -Property @{Text="Run Disk Cleanup"; Size="200,30"; Location="20,20"}
-$btnFlushDNS = New-Object System.Windows.Forms.Button -Property @{Text="Flush DNS Cache"; Size="200,30"; Location="20,60"}
-$btnDisableBackgroundApps = New-Object System.Windows.Forms.Button -Property @{Text="Disable Background Apps"; Size="200,30"; Location="20,100"}
-$btnEnableBackgroundApps = New-Object System.Windows.Forms.Button -Property @{Text="Enable Background Apps"; Size="200,30"; Location="240,100"}
-$btnOpenTaskManager = New-Object System.Windows.Forms.Button -Property @{Text="Open Task Manager"; Size="200,30"; Location="20,140"}
-$btnOpenWindowsTools = New-Object System.Windows.Forms.Button -Property @{Text="Open Windows Tools"; Size="200,30"; Location="20,180"}
-
-$btnDiskCleanup.Add_Click({ Write-Host "Launching Disk Cleanup..."; Log "Launching Disk Cleanup"; Start-Process -FilePath cleanmgr.exe })
-$btnFlushDNS.Add_Click({ Write-Host "Flushing DNS Cache..."; ipconfig /flushdns | Write-Host; Log "DNS cache flushed" })
-$btnDisableBackgroundApps.Add_Click({ Write-Host "Disabling background apps..."; Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 1; Log "Background apps disabled" })
-$btnEnableBackgroundApps.Add_Click({ Write-Host "Enabling background apps..."; Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 0; Log "Background apps enabled" })
-$btnOpenTaskManager.Add_Click({ Write-Host "Opening Task Manager..."; Log "Task Manager opened"; Start-Process taskmgr.exe })
-$btnOpenWindowsTools.Add_Click({ Write-Host "Opening Windows Tools..."; Log "Windows Tools opened"; Start-Process control.exe appwiz.cpl })
+$btnDiskCleanup = New-Object System.Windows.Forms.Button -Property @{ Text = "Run Disk Cleanup"; Size = "200,30"; Location = "20,20" }
+$btnFlushDNS = New-Object System.Windows.Forms.Button -Property @{ Text = "Flush DNS Cache"; Size = "200,30"; Location = "20,60" }
+$btnDisableBackgroundApps = New-Object System.Windows.Forms.Button -Property @{ Text = "Disable Background Apps"; Size = "200,30"; Location = "20,100" }
+$btnEnableBackgroundApps = New-Object System.Windows.Forms.Button -Property @{ Text = "Enable Background Apps"; Size = "200,30"; Location = "240,100" }
+$btnOpenTaskManager = New-Object System.Windows.Forms.Button -Property @{ Text = "Open Task Manager"; Size = "200,30"; Location = "20,140" }
+$btnOpenWindowsTools = New-Object System.Windows.Forms.Button -Property @{ Text = "Open Windows Tools"; Size = "200,30"; Location = "20,180" }
 
 $tabAdvanced.Controls.AddRange(@($btnDiskCleanup, $btnFlushDNS, $btnDisableBackgroundApps, $btnEnableBackgroundApps, $btnOpenTaskManager, $btnOpenWindowsTools))
+
+$btnDiskCleanup.Add_Click({ 
+    try {
+        if (Test-Path (Get-Command cleanmgr.exe -ErrorAction Stop).Source) {
+            Start-Process -FilePath cleanmgr.exe -ArgumentList "/sagerun:1" -ErrorAction Stop
+            Log "Ran Disk Cleanup with preset 1"
+        } else {
+            Log "cleanmgr.exe not found"
+        }
+    } catch {
+        Log "Failed to run Disk Cleanup: $_"
+    }
+})
+
+$btnFlushDNS.Add_Click({ 
+    try {
+        $result = ipconfig /flushdns
+        Write-Host $result
+        if ($result -match "successfully") {
+            Log "DNS cache flushed"
+        } else {
+            Log "Failed to flush DNS cache"
+        }
+    } catch {
+        Log "Failed to flush DNS cache: $_"
+    }
+})
+
+$btnDisableBackgroundApps.Add_Click({ 
+    try {
+        Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 1 -ErrorAction Stop
+        $status = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled"
+        Log "Background apps disabled: GlobalUserDisabled = $($ diputatus.GlobalUserDisabled)"
+    } catch {
+        Log "Failed to disable background apps: $_"
+    }
+})
+
+$btnEnableBackgroundApps.Add_Click({ 
+    try {
+        Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 0 -ErrorAction Stop
+        $status = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled"
+        Log "Background apps enabled: GlobalUserDisabled = $($status.GlobalUserDisabled)"
+    } catch {
+        Log "Failed to enable background apps: $_"
+    }
+})
+
+$btnOpenTaskManager.Add_Click({ 
+    try {
+        Start-Process taskmgr.exe -ErrorAction Stop
+        Log "Task Manager opened"
+    } catch {
+        Log "Failed to open Task Manager: $_"
+    }
+})
+
+$btnOpenWindowsTools.Add_Click({ 
+    try {
+        Start-Process control.exe -ArgumentList "appwiz.cpl" -ErrorAction Stop
+        Log "Windows Tools opened"
+    } catch {
+        Log "Failed to open Windows Tools: $_"
+    }
+})
 
 # === Tab 4: System Info ===
 $tabSystemInfo = New-Object System.Windows.Forms.TabPage -Property @{ Text = "System Info" }
@@ -202,53 +349,57 @@ $txtSysInfo = New-Object System.Windows.Forms.TextBox -Property @{
     Multiline = $true; ReadOnly = $true; ScrollBars = "Vertical";
     Location = "10,10"; Size = "540,460"; Font = $monoFont
 }
-$btnRefreshSys = New-Object System.Windows.Forms.Button -Property @{Text="Refresh Info"; Size="120,30"; Location="10,480"; Font = $defaultFont}
+$btnRefreshSys = New-Object System.Windows.Forms.Button -Property @{ Text = "Refresh Info"; Size = "120,30"; Location = "10,480"; Font = $defaultFont }
+
+$tabSystemInfo.Controls.AddRange(@($txtSysInfo, $btnRefreshSys))
 
 $btnRefreshSys.Add_Click({
     $info = @()
-    $info += "==================== SYSTEM SUMMARY ===================="
-    $info += "Computer Name     : $(hostname)"
-    $info += "OS Version        : $((Get-CimInstance Win32_OperatingSystem).Caption)"
-    $info += "OS Build          : $([Environment]::OSVersion.Version.ToString())"
-    $info += "CPU               : $((Get-CimInstance Win32_Processor).Name)"
-    $info += "RAM               : {0:N0} MB" -f ((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)
+    try {
+        $info += "==================== SYSTEM SUMMARY ===================="
+        $info += "Computer Name     : $(hostname)"
+        $info += "OS Version        : $((Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption)"
+        $info += "OS Build          : $([Environment]::OSVersion.Version.ToString())"
+        $info += "CPU               : $((Get-CimInstance Win32_Processor -ErrorAction Stop).Name)"
+        $info += "RAM               : {0:N0} MB" -f ((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1MB)
 
-    $cDrive = Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DeviceID -eq "C:" }
-    if ($cDrive) {
-        $info += "Disk (C:) Total   : $([math]::Round($cDrive.Size / 1GB)) GB"
-        $info += "Disk (C:) Free    : $([math]::Round($cDrive.FreeSpace / 1GB)) GB"
-    } else {
-        $info += "Disk Info         : Not Detected"
-    }
-
-    $info += "Last Boot         : $((Get-CimInstance Win32_OperatingSystem).LastBootUpTime)"
-
-    $gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1 -ExpandProperty Name
-    if ($gpu) { $info += "GPU               : $gpu" } else { $info += "GPU               : Not Detected" }
-
-    $battery = Get-CimInstance Win32_Battery
-    if ($battery) {
-        $batteryStatus = switch ($battery.BatteryStatus) {
-            1 { "Discharging" }
-            2 { "AC connected" }
-            3 { "Fully Charged" }
-            4 { "Low" }
-            5 { "Critical" }
-            6 { "Charging" }
-            default { "Unknown" }
+        $cDrive = Get-CimInstance Win32_LogicalDisk -ErrorAction Stop | Where-Object { $_.DeviceID -eq "C:" }
+        if ($cDrive) {
+            $info += "Disk (C:) Total   : $([math]::Round($cDrive.Size / 1GB)) GB"
+            $info += "Disk (C:) Free    : $([math]::Round($cDrive.FreeSpace / 1GB)) GB"
+        } else {
+            $info += "Disk Info         : Not Detected"
         }
-        $info += "Battery Status    : $batteryStatus"
-        $info += "Battery Remaining : $($battery.EstimatedChargeRemaining)%"
-    } else {
-        $info += "Battery Info      : Not Detected"
+
+        $info += "Last Boot         : $((Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime)"
+
+        $gpu = Get-CimInstance Win32_VideoController -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Name
+        if ($gpu) { $info += "GPU               : $gpu" } else { $info += "GPU               : Not Detected" }
+
+        $battery = Get-CimInstance Win32_Battery -ErrorAction Stop
+        if ($battery) {
+            $batteryStatus = switch ($battery.BatteryStatus) {
+                1 { "Discharging" }
+                2 { "AC connected" }
+                3 { "Fully Charged" }
+                4 { "Low" }
+                5 { "Critical" }
+                6 { "Charging" }
+                default { "Unknown" }
+            }
+            $info += "Battery Status    : $batteryStatus"
+            $info += "Battery Remaining : $($battery.EstimatedChargeRemaining)%"
+        } else {
+            $info += "Battery Info      : Not Detected"
+        }
+        $info += "========================================================"
+        Log "System info refreshed"
+    } catch {
+        Log "Failed to refresh system info: $_"
+        $info += "Error retrieving system info: $_"
     }
-    $info += "========================================================"
-
     $txtSysInfo.Lines = $info
-    Log "System info refreshed"
 })
-
-$tabSystemInfo.Controls.AddRange(@($txtSysInfo, $btnRefreshSys))
 
 # === Tab 5: License Info ===
 $tabLicenseInfo = New-Object System.Windows.Forms.TabPage -Property @{ Text = "License Info" }
@@ -256,59 +407,58 @@ $txtLicenses = New-Object System.Windows.Forms.TextBox -Property @{
     Multiline = $true; ReadOnly = $true; ScrollBars = "Vertical";
     Location = "10,10"; Size = "540,460"; Font = $defaultFont
 }
-$btnRefreshLicenses = New-Object System.Windows.Forms.Button -Property @{Text="Refresh Licenses"; Size="120,30"; Location="10,480"; Font = $defaultFont}
-
-$btnRefreshLicenses.Add_Click({
-    $lines = @()
-    $lines += "==================== LICENSED SOFTWARE ===================="
-
-    $registryPaths = @(
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
-    )
-
-    foreach ($path in $registryPaths) {
-        $apps = Get-ItemProperty $path -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and ($_.DisplayName -match "Adobe|Office|Microsoft 365|Acrobat") }
-        foreach ($app in $apps) {
-            $lines += "App: $($app.DisplayName)"
-            if ($app.Publisher) { $lines += "Publisher: $($app.Publisher)" }
-            if ($app.InstallDate) { $lines += "Installed On: $($app.InstallDate)" }
-            if ($app.HelpLink) { $lines += "HelpLink: $($app.HelpLink)" }
-
-            if ($app.DisplayName -like "*Adobe*" -or $app.DisplayName -like "*Acrobat*") {
-                $adobeKeyPaths = @(
-                    "HKLM:\SOFTWARE\Adobe\Adobe Acrobat\*",
-                    "HKLM:\SOFTWARE\WOW6432Node\Adobe\Adobe Acrobat\*"
-                )
-                foreach ($adobePath in $adobeKeyPaths) {
-                    try {
-                        Get-ChildItem -Path $adobePath -ErrorAction SilentlyContinue | ForEach-Object {
-                            $props = Get-ItemProperty -Path $_.PsPath -ErrorAction SilentlyContinue
-                            foreach ($name in $props.PSObject.Properties.Name) {
-                                if ($name -like '*Serial*' -or $name -like '*License*') {
-                                    $value = $props.$name
-                                    if ($value) { $lines += "License Info: $name = $value" }
-                                }
-                            }
-                        }
-                    } catch {}
-                }
-            }
-            $lines += "---"
-        }
-    }
-
-    $lines += "(Note: License keys are only visible if stored in plain registry values)"
-    $lines += "==========================================================="
-
-    $txtLicenses.Lines = $lines
-    Log "License info refreshed"
-})
+$btnRefreshLicenses = New-Object System.Windows.Forms.Button -Property @{ Text = "Refresh Licenses"; Size = "120,30"; Location = "10,480"; Font = $defaultFont }
 
 $tabLicenseInfo.Controls.AddRange(@($txtLicenses, $btnRefreshLicenses))
 
+$btnRefreshLicenses.Add_Click({
+    $lines = @()
+    try {
+        $lines += "==================== LICENSED SOFTWARE ===================="
+        $registryPaths = @(
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+        )
 
+        foreach ($path in $registryPaths) {
+            $apps = Get-ItemProperty $path -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and ($_.DisplayName -match "Adobe|Office|Microsoft 365|Acrobat") }
+            foreach ($app in $apps) {
+                $lines += "App: $($app.DisplayName)"
+                if ($app.Publisher) { $lines += "Publisher: $($app.Publisher)" }
+                if ($app.InstallDate) { $lines += "Installed On: $($app.InstallDate)" }
+                if ($app.HelpLink) { $lines += "HelpLink: $($app.HelpLink)" }
 
+                if ($app.DisplayName -like "*Adobe*" -or $app.DisplayName -like "*Acrobat*") {
+                    $adobeKeyPaths = @(
+                        "HKLM:\SOFTWARE\Adobe\Adobe Acrobat\*",
+                        "HKLM:\SOFTWARE\WOW6432Node\Adobe\Adobe Acrobat\*"
+                    )
+                    foreach ($adobePath in $adobeKeyPaths) {
+                        try {
+                            Get-ChildItem -Path $adobePath -ErrorAction SilentlyContinue | ForEach-Object {
+                                $props = Get-ItemProperty -Path $_.PsPath -ErrorAction SilentlyContinue
+                                foreach ($name in $props.PSObject.Properties.Name) {
+                                    if ($name -like '*Serial*' -or $name -like '*License*') {
+                                        $value = $props.$name
+                                        if ($value) { $lines += "License Info: $name = $value" }
+                                    }
+                                }
+                            }
+                        } catch {}
+                    }
+                }
+                $lines += "---"
+            }
+        }
+        $lines += "(Note: License keys are only visible if stored in plain registry values)"
+        $lines += "==========================================================="
+        Log "License info refreshed"
+    } catch {
+        Log "Failed to refresh license info: $_"
+        $lines += "Error retrieving license info: $_"
+    }
+    $txtLicenses.Lines = $lines
+})
 
 # === Finalize ===
 $tabs.TabPages.AddRange(@($tabOptimize, $tabUninstall, $tabAdvanced, $tabSystemInfo, $tabLicenseInfo))
