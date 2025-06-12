@@ -127,13 +127,17 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
         </ScrollViewer>
 
         <!-- Main Content Area: Output and Progress Panel (Collapsed by default) -->
-        <StackPanel Grid.Row="1" x:Name="OutputAndProgressBarPanel" Visibility="Collapsed">
-            <ProgressBar x:Name="OverallProgressBar" Height="20" Margin="0,10,0,10"
+        <Grid Grid.Row="1" x:Name="OutputAndProgressBarPanel" Visibility="Collapsed"> <!-- Changed to Grid -->
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/> <!-- For ProgressBar -->
+                <RowDefinition Height="*"/>    <!-- For OutputTextBox -->
+            </Grid.RowDefinitions>
+            <ProgressBar x:Name="OverallProgressBar" Grid.Row="0" Height="20" Margin="0,10,0,10"
                          Foreground="#4CAF50" Background="#E0E0E0" BorderBrush="#CCCCCC" BorderThickness="1"/>
-            <TextBox x:Name="OutputTextBox" VerticalAlignment="Stretch" HorizontalAlignment="Stretch"
+            <TextBox x:Name="OutputTextBox" Grid.Row="1" VerticalAlignment="Stretch" HorizontalAlignment="Stretch"
                      TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" IsReadOnly="True"
                      Background="#E0E0E0" Foreground="#333333" FontFamily="Consolas" FontSize="12"/>
-        </StackPanel>
+        </Grid>
         
         <!-- Buttons Panel -->
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
@@ -244,12 +248,22 @@ function Disable-ScheduledTask {
     )
     try {
         # Using schtasks.exe for more robust cross-environment execution
-        # Get the task name from the full path for schtasks.exe
-        $taskName = ($TaskPath | Split-Path -Leaf)
+        # Ensure the TaskPath starts with '\' for schtasks /TN parameter to work correctly for root tasks
+        $normalizedTaskPath = $TaskPath
+        if (-not $normalizedTaskPath.StartsWith('\')) {
+            $normalizedTaskPath = '\' + $normalizedTaskPath
+        }
+
+        # Check if the task exists before trying to disable (optional, but good for clearer output)
+        $checkTaskResult = schtasks.exe /Query /TN "`"$normalizedTaskPath`"" 2>&1 | Out-String
+        if ($checkTaskResult -like "*ERROR: The system cannot find the file specified.*") {
+            Write-OutputToTextBox "Scheduled task '$TaskPath' not found." "Yellow"
+            return
+        }
 
         # Build the schtasks command
         $schtasksCommand = "schtasks.exe"
-        $schtasksArgs = @("/Change", "/TN", "`"$TaskPath`"", "/DISABLE") # Quote TaskPath for spaces
+        $schtasksArgs = @("/Change", "/TN", "`"$normalizedTaskPath`"", "/DISABLE") # Quote TaskPath for spaces
 
         # Execute schtasks.exe and capture output
         $schtasksResult = & $schtasksCommand $schtasksArgs 2>&1 | Out-String
@@ -257,10 +271,10 @@ function Disable-ScheduledTask {
 
         if ($schtasksResult -like "*SUCCESS*" -or $schtasksResult -like "*already disabled*") {
             Write-OutputToTextBox "Successfully disabled scheduled task: $TaskPath" "Green"
-        } elseif ($schtasksResult -like "*ERROR*" -or $schtasksResult -like "*not found*") {
-            Write-OutputToTextBox "Scheduled task '$TaskPath' not found or could not be disabled via schtasks.exe. Output: $schtasksResult" "Yellow"
-        } else {
+        } elseif ($schtasksResult -like "*ERROR*") {
             Write-OutputToTextBox "Error disabling scheduled task '$TaskPath' via schtasks.exe. Output: $schtasksResult" "Red"
+        } else {
+            Write-OutputToTextBox "Disabling scheduled task '$TaskPath' via schtasks.exe. Output: $schtasksResult" "Blue" # General info if no clear success/error
         }
     } catch {
         Write-OutputToTextBox "Error disabling scheduled task '$TaskPath' (PowerShell exception): $($_.Exception.Message)" "Red"
