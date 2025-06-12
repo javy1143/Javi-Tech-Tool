@@ -243,19 +243,27 @@ function Disable-ScheduledTask {
         [string]$TaskPath # This is the full path like "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser"
     )
     try {
-        # Get the scheduled task to ensure it exists and to get its properties
-        $task = Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue
-        
-        if ($task) {
-            # Explicitly pass TaskName and TaskPath (folder path) to the built-in cmdlet.
-            # $task.Path refers to the folder path, not the full task path with name.
-            Microsoft.PowerShell.ScheduledJob\Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.Path -ErrorAction Stop
+        # Using schtasks.exe for more robust cross-environment execution
+        # Get the task name from the full path for schtasks.exe
+        $taskName = ($TaskPath | Split-Path -Leaf)
+
+        # Build the schtasks command
+        $schtasksCommand = "schtasks.exe"
+        $schtasksArgs = @("/Change", "/TN", "`"$TaskPath`"", "/DISABLE") # Quote TaskPath for spaces
+
+        # Execute schtasks.exe and capture output
+        $schtasksResult = & $schtasksCommand $schtasksArgs 2>&1 | Out-String
+        $schtasksResult = $schtasksResult.Trim()
+
+        if ($schtasksResult -like "*SUCCESS*" -or $schtasksResult -like "*already disabled*") {
             Write-OutputToTextBox "Successfully disabled scheduled task: $TaskPath" "Green"
+        } elseif ($schtasksResult -like "*ERROR*" -or $schtasksResult -like "*not found*") {
+            Write-OutputToTextBox "Scheduled task '$TaskPath' not found or could not be disabled via schtasks.exe. Output: $schtasksResult" "Yellow"
         } else {
-            Write-OutputToTextBox "Scheduled task '$TaskPath' not found. It might not exist on this system or the path is incorrect." "Yellow"
+            Write-OutputToTextBox "Error disabling scheduled task '$TaskPath' via schtasks.exe. Output: $schtasksResult" "Red"
         }
     } catch {
-        Write-OutputToTextBox "Error disabling scheduled task '$TaskPath': $($_.Exception.Message)" "Red"
+        Write-OutputToTextBox "Error disabling scheduled task '$TaskPath' (PowerShell exception): $($_.Exception.Message)" "Red"
     }
 }
 #endregion
