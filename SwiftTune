@@ -2,7 +2,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 
 #region Initial Administrator Check
 # Check if the script is running with Administrator privileges
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) { # Corrected type reference
     [System.Windows.Forms.MessageBox]::Show("This script requires Administrator privileges to run all optimizations. Please right-click the script and choose 'Run as administrator'.", "Permission Denied", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Stop)
     exit # Exit the script if not running as administrator
 }
@@ -239,8 +239,8 @@ function Disable-ScheduledTask {
 
         $task = Get-ScheduledTask -TaskPath $fullTaskPath -ErrorAction SilentlyContinue
         if ($task) {
-            # Explicitly call the built-in cmdlet using its full name
-            Microsoft.PowerShell.ScheduledJob\Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.Path -ErrorAction Stop
+            # Explicitly call the built-in cmdlet using its full name, passing TaskName directly
+            Microsoft.PowerShell.ScheduledJob\Disable-ScheduledTask -TaskName $task.TaskName -ErrorAction Stop
             Write-OutputToTextBox "Successfully disabled scheduled task: $TaskPath" "Green"
         } else {
             Write-OutputToTextBox "Scheduled task '$TaskPath' not found. It might not exist on this system or the path is incorrect." "Yellow"
