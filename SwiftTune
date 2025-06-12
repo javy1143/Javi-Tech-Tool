@@ -784,7 +784,7 @@ $runButton.Add_Click({
     # Hide options panel and show output/progress panel
     $optionsPanel.Visibility = "Collapsed"
     $outputAndProgressBarPanel.Visibility = "Visible" # Make the output and progress panel visible
-    $runButton.IsEnabled = $false # Disable button during execution
+    $runButton.IsEnabled = $False # Disable button during execution (Changed to $False)
 
     Write-OutputToTextBox "Starting Windows Optimization Process..." "Orange"
     Write-OutputToTextBox "Please ensure you are running this script with Administrator privileges for full functionality." "Orange"
@@ -806,7 +806,7 @@ $runButton.Add_Click({
         $window.FindName("CheckBox_DisableBackgroundApps").IsChecked
     )
 
-    $totalSelectedCategories = ($majorCategories | Where-Object { $_ -eq $true }).Count
+    $totalSelectedCategories = ($majorCategories | Where-Object { $_ -eq $True }).Count # Changed to $True
     $completedCategories = 0
 
     if ($totalSelectedCategories -eq 0) {
@@ -814,7 +814,7 @@ $runButton.Add_Click({
         $overallProgressBar.Value = 0
         $overallProgressBar.Visibility = "Collapsed"
         $outputAndProgressBarPanel.Visibility = "Collapsed" # Hide output panel if nothing ran
-        $runButton.IsEnabled = true
+        $runButton.IsEnabled = $True # Changed to $True
         $optionsPanel.Visibility = "Visible"
         return # Exit early if nothing is selected
     }
@@ -928,7 +928,7 @@ $runButton.Add_Click({
     $overallProgressBar.Value = 100 # Ensure it's full at the end
     Start-Sleep -Milliseconds 500 # Small pause to see 100%
     $overallProgressBar.Visibility = "Collapsed" # Hide when done
-    $runButton.IsEnabled = true # Re-enable button
+    $runButton.IsEnabled = $True # Re-enable button (Changed to $True)
     $optionsPanel.Visibility = "Visible" # Show options again after completion
 })
 
