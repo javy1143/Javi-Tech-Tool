@@ -127,7 +127,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
         </ScrollViewer>
 
         <!-- Main Content Area: Output and Progress Panel (Collapsed by default) -->
-        <Grid Grid.Row="1" x:Name="OutputAndProgressBarPanel" Visibility="Collapsed"> <!-- Changed to Grid -->
+        <Grid Grid.Row="1" x:Name="OutputAndProgressBarPanel" Visibility="Collapsed">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/> <!-- For ProgressBar -->
                 <RowDefinition Height="*"/>    <!-- For OutputTextBox -->
@@ -135,8 +135,942 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
             <ProgressBar x:Name="OverallProgressBar" Grid.Row="0" Height="20" Margin="0,10,0,10"
                          Foreground="#4CAF50" Background="#E0E0E0" BorderBrush="#CCCCCC" BorderThickness="1"/>
             <TextBox x:Name="OutputTextBox" Grid.Row="1" VerticalAlignment="Stretch" HorizontalAlignment="Stretch"
-                     TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" IsReadOnly="True"
-                     Background="#E0E0E0" Foreground="#333333" FontFamily="Consolas" FontSize="12"/>
+                     TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" IsReadOnly="True" MinHeight="100"/> <!-- Added MinHeight -->
+        </Grid>
+        
+        <!-- Buttons Panel -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
+            <Button x:Name="RunButton" Content="Run Optimizations" Width="150" Height="30" Margin="0,0,10,0" Background="#4CAF50" Foreground="White" FontWeight="Bold"/>
+        </StackPanel>
+    </Grid>
+</Window>
+"@
+
+# Initialize the UI
+$reader = New-Object System.Xml.XmlNodeReader($xaml)
+$window = [Windows.Markup.XamlReader]::Load($reader)
+
+# Get controls by name
+$runButton = $window.FindName("RunButton")
+$outputTextBox = $window.FindName("OutputTextBox")
+$optionsPanel = $window.FindName("OptionsPanel")
+$overallProgressBar = $window.FindName("OverallProgressBar")
+$outputAndProgressBarPanel = $window.FindName("OutputAndProgressBarPanel") # Get reference to the new panel
+
+#region Helper Functions
+function Write-OutputToTextBox {
+    param (
+        [string]$Message,
+        [string]$Color = "Black"
+    )
+    $outputTextBox.Dispatcher.Invoke([Action[string, string]]{
+        param($msg, $col)
+        $outputTextBox.AppendText("$msg`n")
+        $outputTextBox.ScrollToEnd()
+    }, $Message, $Color)
+}
+
+function Set-RegistryValue {
+    param (
+        [string]$Path,
+        [string]$Name,
+        $Value,
+        [string]$Type = "DWord" # Default to DWord as it's common for these settings
+    )
+    try {
+        if (-not (Test-Path $Path)) {
+            New-Item -Path $Path -Force | Out-Null
+            Write-OutputToTextBox "Created Registry Path: $Path" "Blue"
+        }
+        Set-ItemProperty -Path $Path -Name $Name -Value $Value -Force -ErrorAction Stop
+        Write-OutputToTextBox "Successfully set registry value: '$Name' at '$Path' to '$Value'" "Green"
+    } catch {
+        Write-OutputToTextBox "Error setting registry value for '$Name' at '$Path': $($_.Exception.Message)" "Red"
+    }
+}
+
+function Set-ServiceStartupType {
+    param (
+        [string]$ServicePattern, # Can be display name or service name, potentially with wildcards
+        [string]$StartupType # e.g., "Automatic", "Manual", "Disabled", "AutomaticDelayedStart"
+    )
+    try {
+        # Standardize startup type if "AutomaticDelayedStart" is requested
+        $actualStartupType = $StartupType
+        if ($StartupType -eq "AutomaticDelayedStart") {
+            $actualStartupType = "Automatic"
+        }
+
+        # Attempt to find the service by name (exact or wildcard) or display name (exact or wildcard)
+        $service = Get-Service -Name $ServicePattern -ErrorAction SilentlyContinue
+        if (-not $service) {
+            # If not found by name, try by display name
+            $service = Get-Service | Where-Object { $_.DisplayName -like $ServicePattern } | Select-Object -First 1
+        }
+
+        if ($service) {
+            # Get the actual service name for Set-Service
+            $serviceName = $service.Name
+            $serviceDisplayName = $service.DisplayName
+
+            Set-Service -Name $serviceName -StartupType $actualStartupType -ErrorAction Stop
+            Write-OutputToTextBox "Successfully set service '$serviceDisplayName' ($serviceName) to Startup Type: $actualStartupType" "Green"
+
+            # If original request was AutomaticDelayedStart, attempt to set DelayedAutoStart registry property
+            if ($StartupType -eq "AutomaticDelayedStart") {
+                try {
+                    $serviceRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+                    Set-ItemProperty -Path $serviceRegPath -Name "DelayedAutoStart" -Value 1 -Force -ErrorAction Stop
+                    Write-OutputToTextBox "  Set DelayedAutoStart for '$serviceDisplayName' ($serviceName)." "Green"
+                } catch {
+                    Write-OutputToTextBox "  Warning: Could not set DelayedAutoStart for '$serviceDisplayName' ($serviceName): $($_.Exception.Message)" "Yellow"
+                }
+            }
+
+        } else {
+            Write-OutputToTextBox "Service matching pattern '$ServicePattern' not found." "Yellow"
+        }
+    } catch {
+        Write-OutputToTextBox "Error setting service '$ServicePattern' startup type: $($_.Exception.Message)" "Red"
+        # Provide more context for common errors
+        if ($_.Exception.Message -like "*Access is denied*") {
+            Write-OutputToTextBox "  This typically means the service is highly system-protected and cannot be changed by the script." "Red"
+        } elseif ($_.Exception.Message -like "*The parameter is incorrect*" -or $_.Exception.Message -like "*Cannot bind parameter 'StartupType'*") {
+            Write-OutputToTextBox "  This may indicate the service is dynamic, user-specific, or its startup type cannot be set directly." "Red"
+        }
+    }
+}
+
+function Disable-ScheduledTask {
+    param (
+        [string]$TaskPath # This is the full path like "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser"
+    )
+    try {
+        # Using schtasks.exe for more robust cross-environment execution
+        # Ensure the TaskPath starts with '\' for schtasks /TN parameter to work correctly for root tasks
+        $normalizedTaskPath = $TaskPath
+        if (-not $normalizedTaskPath.StartsWith('\')) {
+            $normalizedTaskPath = '\' + $normalizedTaskPath
+        }
+
+        # Check if the task exists before trying to disable (optional, but good for clearer output)
+        $checkTaskResult = schtasks.exe /Query /TN "`"$normalizedTaskPath`"" 2>&1 | Out-String
+        if ($checkTaskResult -like "*ERROR: The system cannot find the file specified.*") {
+            Write-OutputToTextBox "Scheduled task '$TaskPath' not found." "Yellow"
+            return
+        }
+
+        # Build the schtasks command
+        $schtasksCommand = "schtasks.exe"
+        $schtasksArgs = @("/Change", "/TN", "`"$normalizedTaskPath`"", "/DISABLE") # Quote TaskPath for spaces
+
+        # Execute schtasks.exe and capture output
+        $schtasksResult = & $schtasksCommand $schtasksArgs 2>&1 | Out-String
+        $schtasksResult = $schtasksResult.Trim()
+
+        if ($schtasksResult -like "*SUCCESS*" -or $schtasksResult -like "*already disabled*") {
+            Write-OutputToTextBox "Successfully disabled scheduled task: $TaskPath" "Green"
+        } elseif ($schtasksResult -like "*ERROR*") {
+            Write-OutputToTextBox "Error disabling scheduled task '$TaskPath' via schtasks.exe. Output: $schtasksResult" "Red"
+        } else {
+            Write-OutputToTextBox "Disabling scheduled task '$TaskPath' via schtasks.exe. Output: $schtasksResult" "Blue" # General info if no clear success/error
+        }
+    } catch {
+        Write-OutputToTextBox "Error disabling scheduled task '$TaskPath' (PowerShell exception): $($_.Exception.Message)" "Red"
+    }
+}
+#endregion
+
+#region Optimization Functions (based on CTT Tool.txt)
+
+function Perform-DeleteTemporaryFiles {
+    Write-OutputToTextBox "Attempting to delete temporary files..." "Blue"
+    try {
+        Get-ChildItem -Path "C:\Windows\Temp" -File -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+        Get-ChildItem -Path $env:TEMP -File -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+        Write-OutputToTextBox "Temporary files deleted successfully." "Green"
+    } catch {
+        Write-OutputToTextBox "Error deleting temporary files: $($_.Exception.Message)" "Red"
+    }
+}
+
+function Perform-DisableConsumerFeatures {
+    Write-OutputToTextBox "Attempting to disable Consumer Features..." "Blue"
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsConsumerFeatures" -Value 1 -Type DWord
+}
+
+function Perform-DisableTelemetry {
+    Write-OutputToTextBox "Attempting to disable Telemetry..." "Blue"
+
+    # Disabling Scheduled Tasks
+    @("\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
+      "\Microsoft\Windows\Application Experience\ProgramDataUpdater",
+      "\Microsoft\Windows\Autochk\Proxy",
+      "\Microsoft\Windows\Customer Experience Improvement Program\Consolidator",
+      "\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip",
+      "\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector",
+      "\Microsoft\Windows\Feedback\Siuf\DmClient",
+      "\Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload",
+      "\Microsoft\Windows\Windows Error Reporting\QueueReporting",
+      "\Microsoft\Windows\Application Experience\MareBackup",
+      "\Microsoft\Windows\Application Experience\StartupAppTask",
+      "\Microsoft\Windows\Application Experience\PcaPatchDbTask",
+      "\Microsoft\Windows\Maps\MapsUpdateTask"
+    ) | ForEach-Object { Disable-ScheduledTask -TaskPath $_ }
+
+    # Setting Registry Values for Telemetry
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection" -Name "AllowTelemetry" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "ContentDeliveryAllowed" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "OemPreInstalledAppsEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "PreInstalledAppsEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "PreInstalledAppsEverEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SilentInstalledAppsEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SubscribedContent-338387Enabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SubscribedContent-338388Enabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SubscribedContent-338389Enabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SubscribedContent-353698Enabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SystemPaneSuggestionsEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Siuf\Rules" -Name "NumberOfSIUFInPeriod" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "DoNotShowFeedbackNotifications" -Value 1 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableTailoredExperiencesWithDiagnosticData" -Value 1 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo" -Name "DisabledByGroupPolicy" -Value 1 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "Disabled" -Value 1 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Config" -Name "DODownloadMode" -Value 1 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance" -Name "fAllowToGetHelp" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\OperationStatusManager" -Name "EnthusiastMode" -Value 1 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowTaskViewButton" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\People" -Name "PeopleBand" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "LaunchTo" -Value 1 -Type DWord # 1 for Desktop
+    Set-RegistryValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching" -Name "SearchOrderConfig" -Value 1 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "SystemResponsiveness" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 4294967295 -Type DWord
+    Set-RegistryValue -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value 1 -Type String
+    Set-RegistryValue -Path "HKCU:\Control Panel\Desktop" -Name "AutoEndTasks" -Value 1 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "ClearPageFileAtShutdown" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SYSTEM\ControlSet001\Services\Ndu" -Name "Start" -Value 2 -Type DWord # 2 for Automatic
+    Set-RegistryValue -Path "HKCU:\Control Panel\Mouse" -Name "MouseHoverTime" -Value 400 -Type String
+    Set-RegistryValue -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters" -Name "IRPStackSize" -Value 30 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds" -Name "EnableFeeds" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Feeds" -Name "ShellFeedsTaskbarViewMode" -Value 2 -Type DWord
+    Set-RegistryValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "HideSCAMeetNow" -Value 1 -Type DWord
+    Set-RegistryValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" -Name "ScoobeSystemSettingEnabled" -Value 0 -Type DWord
+}
+
+function Perform-DisableActivityHistory {
+    Write-OutputToTextBox "Attempting to disable Activity History..." "Blue"
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableActivityFeed" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "PublishUserActivities" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "UploadUserActivities" -Value 0 -Type DWord
+}
+
+function Perform-DisableGameDVR {
+    Write-OutputToTextBox "Attempting to disable GameDVR..." "Blue"
+    Set-RegistryValue -Path "HKCU:\System\GameConfigStore" -Name "GameDVR_FSEBehavior" -Value 2 -Type DWord
+    Set-RegistryValue -Path "HKCU:\System\GameConfigStore" -Name "GameDVR_Enabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\System\GameConfigStore" -Name "GameDVR_HonorUserFSEBehaviorMode" -Value 1 -Type DWord
+    Set-RegistryValue -Path "HKCU:\System\GameConfigStore" -Name "GameDVR_EFSEFeatureFlags" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" -Name "AllowGameDVR" -Value 0 -Type DWord
+}
+
+function Perform-DisableHibernation {
+    Write-OutputToTextBox "Attempting to disable Hibernation..." "Blue"
+    try {
+        # The admin check is now at the beginning of the script.
+        & powercfg.exe /hibernate off | Out-Null
+        Write-OutputToTextBox "Successfully executed 'powercfg.exe /hibernate off'." "Green"
+
+        Set-RegistryValue -Path "HKLM:\System\CurrentControlSet\Control\Session Manager\Power" -Name "HibernateEnabled" -Value 0 -Type DWord
+        Set-RegistryValue -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FlyoutMenuSettings" -Name "ShowHibernateOption" -Value 0 -Type DWord
+    } catch {
+        Write-OutputToTextBox "Error disabling Hibernation: $($_.Exception.Message)" "Red"
+    }
+}
+
+function Perform-DisableHomegroup {
+    Write-OutputToTextBox "Attempting to disable Homegroup services..." "Blue"
+    Set-ServiceStartupType -ServicePattern "HomeGroupListener" -StartupType "Manual"
+    Set-ServiceStartupType -ServicePattern "HomeGroupProvider" -StartupType "Manual"
+}
+
+function Perform-DisableLocationTracking {
+    Write-OutputToTextBox "Attempting to disable Location Tracking..." "Blue"
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location" -Name "Value" -Value "Deny" -Type String
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Sensor\Overrides\{BFA794E4-F964-4FDB-90F6-51056BFE4B44}" -Name "SensorPermissionState" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SYSTEM\CurrentControlSet\Services\lfsvc\Service\Configuration" -Name "Status" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SYSTEM\Maps" -Name "AutoUpdateEnabled" -Value 0 -Type DWord
+}
+
+function Perform-DisableStorageSense {
+    Write-OutputToTextBox "Attempting to disable Storage Sense..." "Blue"
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" -Name "01" -Value 0 -Type Dword
+}
+
+function Perform-DisableWifiSense {
+    Write-OutputToTextBox "Attempting to disable Wi-Fi Sense..." "Blue"
+    Set-RegistryValue -Path "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowWiFiHotSpotReporting" -Name "Value" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowAutoConnectToWiFiSenseHotspots" -Name "Value" -Value 0 -Type DWord
+}
+
+function Perform-DisableRecall {
+    Write-OutputToTextBox "Attempting to disable Recall (Windows AI Data Analysis)..." "Blue"
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI" -Name "DisableAIDataAnalysis" -Value 1 -Type DWord
+    try {
+        # The admin check is now at the beginning of the script.
+        # Attempt to disable the feature using DISM
+        $dismResult = DISM /Online /Disable-Feature /FeatureName:Recall /NoRestart 2>&1 | Out-String
+        Write-OutputToTextBox "DISM Recall command output: $($dismResult.Trim())" "Green"
+        if ($dismResult -notlike "*Error*") {
+            Write-OutputToTextBox "Recall feature disabled successfully (reboot may be required)." "Green"
+        } else {
+            Write-OutputToTextBox "Warning: Could not fully disable Recall feature via DISM. It might not be present or requires administrative privileges." "Yellow"
+        }
+    } catch {
+        Write-OutputToTextBox "Error disabling Recall feature with DISM: $($_.Exception.Message)" "Red"
+    }
+}
+
+
+function Perform-SetServices {
+    Write-OutputToTextBox "Attempting to optimize Windows services startup types..." "Blue"
+    # Mapping of services to their desired startup types
+    # Note: Some services are highly protected or user-session specific and may not be configurable.
+    # "AutomaticDelayedStart" will be converted to "Automatic" and then attempts to set DelayedAutoStart registry property.
+    $servicesToOptimize = @{
+        "AJRouter" = "Disabled";
+        "ALG" = "Manual";
+        "AppIDSvc" = "Manual"; # Often protected
+        "AppMgmt" = "Manual";
+        "AppReadiness" = "Manual";
+        "AppVClient" = "Disabled";
+        "AppXSvc" = "Manual"; # Often protected
+        "Appinfo" = "Manual";
+        "AudioEndpointBuilder" = "Automatic";
+        "AudioSrv" = "Automatic";
+        "AxInstSV" = "Manual";
+        "BFE" = "Automatic"; # Often protected
+        "BITS" = "AutomaticDelayedStart"; # Will attempt to set DelayedAutoStart
+        "BTAGService" = "Manual";
+        "BcastDVRUserService_*" = "Manual"; # User-specific, often problematic
+        "BluetoothUserService_*" = "Manual"; # User-specific, often problematic
+        "BrokerInfrastructure" = "Automatic"; # Often protected
+        "Browser" = "Manual";
+        "BthAvctpSvc" = "Automatic";
+        "BthHFSrv" = "Automatic";
+        "CDPUserSvc_*" = "Automatic"; # User-specific, often problematic
+        "COMSysApp" = "Manual";
+        "CaptureService_*" = "Manual"; # User-specific, often problematic
+        "CertPropSvc" = "Manual";
+        "ClipSVC" = "Manual"; # Often protected
+        "ConsentUxUserSvc_*" = "Manual"; # User-specific, often problematic
+        "CoreMessagingRegistrar" = "Automatic"; # Often protected
+        "CredentialEnrollmentManagerUserSvc_*" = "Manual"; # User-specific, often problematic
+        "CryptSvc" = "Automatic";
+        "CscService" = "Manual";
+        "DcomLaunch" = "Automatic"; # Often protected
+        "DcpSvc" = "Manual";
+        "DevQueryBroker" = "Manual";
+        "DeviceAssociationBrokerSvc_*" = "Manual"; # User-specific, often problematic
+        "DeviceInstall" = "Manual";
+        "DevicePickerUserSvc_*" = "Manual"; # User-specific, often problematic
+        "DevicesFlowUserSvc_*" = "Manual"; # User-specific, often problematic
+        "Dhcp" = "Automatic";
+        "DialogBlockingService" = "Disabled";
+        "DispBrokerDesktopSvc" = "Automatic";
+        "DisplayEnhancementService" = "Manual";
+        "DmEnrollmentSvc" = "Manual";
+        "Dnscache" = "Automatic"; # Often protected
+        "EFS" = "Manual";
+        "EapHost" = "Manual";
+        "EntAppSvc" = "Manual"; # Often protected
+        "EventLog" = "Automatic";
+        "EventSystem" = "Automatic";
+        "FDResPub" = "Manual";
+        "Fax" = "Manual";
+        "FrameServer" = "Manual";
+        "FrameServerMonitor" = "Manual";
+        "GraphicsPerfSvc" = "Manual";
+        "HomeGroupListener" = "Manual"; # If not found, it's normal as Homegroup is deprecated
+        "HomeGroupProvider" = "Manual"; # If not found, it's normal as Homegroup is deprecated
+        "HvHost" = "Manual";
+        "IEEtwCollectorService" = "Manual";
+        "IKEEXT" = "Manual";
+        "InstallService" = "Manual";
+        "InventorySvc" = "Manual";
+        "IpxlatCfgSvc" = "Manual";
+        "KeyIso" = "Automatic";
+        "KtmRm" = "Manual";
+        "LSM" = "Automatic"; # Often protected
+        "LanmanServer" = "Automatic";
+        "LanmanWorkstation" = "Automatic";
+        "LicenseManager" = "Manual";
+        "LxpSvc" = "Manual";
+        "MSDTC" = "Manual";
+        "MSiSCSI" = "Manual";
+        "McpManagementService" = "Manual";
+        "MessagingService_*" = "Manual"; # User-specific, often problematic
+        "MicrosoftEdgeElevationService" = "Manual";
+        "MixedRealityOpenXRSvc" = "Manual";
+        "MpsSvc" = "Automatic"; # Often protected (Windows Defender Firewall)
+        "NPSMSvc_*" = "Manual"; # User-specific, often problematic
+        "NaturalAuthentication" = "Manual";
+        "NcaSvc" = "Manual";
+        "NcbService" = "Manual";
+        "NcdAutoSetup" = "Manual";
+        "NetSetupSvc" = "Manual";
+        "NetTcpPortSharing" = "Disabled";
+        "Netlogon" = "Automatic";
+        "Netman" = "Manual";
+        "NgcCtnrSvc" = "Manual"; # Often protected
+        "NgcSvc" = "Manual"; # Often protected
+        "NlaSvc" = "Manual";
+        "OneSyncSvc_*" = "Automatic"; # User-specific, often problematic
+        "P9RdrService_*" = "Manual"; # User-specific, often problematic
+        "PNRPAutoReg" = "Manual"; # If not found, it's normal
+        "PNRPsvc" = "Manual"; # If not found, it's normal
+        "PeerDistSvc" = "Manual";
+        "PenService_*" = "Manual"; # User-specific, often problematic
+        "PerfHost" = "Manual";
+        "PimIndexMaintenanceSvc_*" = "Manual"; # User-specific, often problematic
+        "PlugPlay" = "Manual";
+        "PolicyAgent" = "Manual";
+        "Power" = "Automatic";
+        "PrintNotify" = "Manual";
+        "PrintWorkflowUserSvc_*" = "Manual"; # User-specific, often problematic
+        "ProfSvc" = "Automatic";
+        "PushToInstall" = "Manual";
+        "QWAVE" = "Manual";
+        "RasAuto" = "Manual";
+        "RasMan" = "Manual";
+        "RemoteAccess" = "Disabled";
+        "RemoteRegistry" = "Disabled";
+        "RmSvc" = "Manual";
+        "RpcEptMapper" = "Automatic"; # Often protected
+        "RpcLocator" = "Manual";
+        "RpcSs" = "Automatic"; # Often protected
+        "SCPolicySvc" = "Manual";
+        "SCardSvr" = "Manual";
+        "SDRSVC" = "Manual";
+        "SEMgrSvc" = "Manual";
+        "SENS" = "Automatic";
+        "SNMPTRAP" = "Manual";
+        "SSDPSRV" = "Manual";
+        "SamSs" = "Automatic";
+        "ScDeviceEnum" = "Manual";
+        "Schedule" = "Automatic"; # Often protected (Task Scheduler)
+        "SecurityHealthService" = "Manual"; # Often protected (Windows Security Service)
+        "Sense" = "Manual"; # Often protected (Windows Defender ATP Service)
+        "SensorDataService" = "Manual";
+        "SensorService" = "Manual";
+        "SensrSvc" = "Manual";
+        "SessionEnv" = "Manual";
+        "SharedAccess" = "Manual";
+        "SharedRealitySvc" = "Manual";
+        "ShellHWDetection" = "Automatic";
+        "SmsRouter" = "Manual";
+        "Spooler" = "Automatic";
+        "SstpSvc" = "Manual";
+        "StiSvc" = "Manual";
+        "SystemEventsBroker" = "Automatic"; # Often protected
+        "TabletInputService" = "Manual";
+        "TapiSrv" = "Manual";
+        "Themes" = "Automatic";
+        "TieringEngineService" = "Manual";
+        "TimeBroker" = "Manual";
+        "TimeBrokerSvc" = "Manual";
+        "TokenBroker" = "Manual";
+        "TroubleshootingSvc" = "Manual";
+        "TrustedInstaller" = "Manual";
+        "UI0Detect" = "Manual";
+        "UdkUserSvc_*" = "Manual"; # User-specific, often problematic
+        "UevAgentService" = "Disabled";
+        "UmRdpService" = "Manual";
+        "UnistoreSvc_*" = "Manual"; # User-specific, often problematic
+        "UserDataSvc_*" = "Manual"; # User-specific, often problematic
+        "UserManager" = "Automatic";
+        "VGAuthService" = "Automatic";
+        "VMTools" = "Automatic";
+        "VSS" = "Manual";
+        "VacSvc" = "Manual";
+        "VaultSvc" = "Automatic";
+        "W32Time" = "Manual";
+        "WEPHOSTSVC" = "Manual";
+        "WFDSConMgrSvc" = "Manual";
+        "WManSvc" = "Manual";
+        "WPDBusEnum" = "Manual";
+        "WSService" = "Manual";
+        "WaaSMedicSvc" = "Manual"; # Often protected
+        "WalletService" = "Manual";
+        "WarpJITSvc" = "Manual";
+        "Wcmsvc" = "Automatic";
+        "WcsPlugInService" = "Manual";
+        "WdNisSvc" = "Manual"; # Often protected
+        "WdiServiceHost" = "Manual";
+        "WdiSystemHost" = "Manual";
+        "WebClient" = "Manual";
+        "Wecsvc" = "Manual";
+        "WerSvc" = "Manual";
+        "WiaRpc" = "Manual";
+        "WinHttpAutoProxySvc" = "Manual"; # Often protected
+        "WinRM" = "Manual";
+        "Winmgmt" = "Automatic";
+        "WlanSvc" = "Automatic";
+        "WpcMonSvc" = "Manual";
+        "WpnUserService_*" = "Automatic"; # User-specific, often problematic
+        "XboxGipSvc" = "Manual";
+        "autotimesvc" = "Manual";
+        "camsvc" = "Manual";
+        "cbdhsvc_*" = "Manual"; # User-specific, often problematic
+        "cloudidsvc" = "Manual";
+        "dcsvc" = "Manual";
+        "defragsvc" = "Manual";
+        "diagnosticshub.standardcollector.service" = "Manual";
+        "diagsvc" = "Manual";
+        "dmwappushservice" = "Manual";
+        "dot3svc" = "Manual";
+        "edgeupdate" = "Manual";
+        "edgeupdatem" = "Manual";
+        "embeddedmode" = "Manual"; # Often protected
+        "fdPHost" = "Manual";
+        "fhsvc" = "Manual";
+        "gpsvc" = "Automatic"; # Often protected
+        "hidserv" = "Manual";
+        "iphlpsvc" = "Automatic";
+        "lltdsvc" = "Manual";
+        "lmhosts" = "Manual";
+        "msiserver" = "Manual"; # Often protected
+        "netprofm" = "Manual";
+        "nsi" = "Automatic";
+        "p2pimsvc" = "Manual"; # If not found, it's normal
+        "p2psvc" = "Manual"; # If not found, it's normal
+        "perceptionsimulation" = "Manual";
+        "pla" = "Manual";
+        "shpamsvc" = "Disabled";
+        "smphost" = "Manual";
+        "spectrum" = "Manual"; # If not found, it's normal
+        "sppsvc" = "AutomaticDelayedStart"; # Will attempt to set DelayedAutoStart
+        "ssh-agent" = "Disabled";
+        "svsvc" = "Manual";
+        "swprv" = "Manual";
+        "tiledatamodelsvc" = "Automatic"; # If not found, it's normal
+        "tzautoupdate" = "Disabled";
+        "uhssvc" = "Disabled"; # If not found, it's normal
+        "upnphost" = "Manual";
+        "vds" = "Manual";
+        "vm3dservice" = "Manual"; # If not found, it's normal
+        "vmicguestinterface" = "Manual";
+        "vmicheartbeat" = "Manual";
+        "vmickvpexchange" = "Manual";
+        "vmicrdv" = "Manual";
+        "vmicshutdown" = "Manual";
+        "vmictimesync" = "Manual";
+        "vmicvmsession" = "Manual";
+        "vmicvss" = "Manual";
+        "vmvss" = "Manual"; # If not found, it's normal
+        "wbengine" = "Manual";
+        "wcncsvc" = "Manual";
+        "webthreatdefsvc" = "Manual";
+        "webthreatdefusersvc_*" = "Automatic"; # User-specific, often problematic
+        "wercplsupport" = "Manual";
+        "wlidsvc" = "Manual";
+        "wlpasvc" = "Manual";
+        "wmiApSrv" = "Manual";
+        "workfolderssvc" = "Manual";
+        "wscsvc" = "AutomaticDelayedStart"; # Will attempt to set DelayedAutoStart
+        "wuauserv" = "Manual";
+        "wudfsvc" = "Manual" # If not found, it's normal
+    }
+
+    foreach ($servicePattern in $servicesToOptimize.Keys) {
+        Set-ServiceStartupType -ServicePattern $servicePattern -StartupType $servicesToOptimize[$servicePattern]
+    }
+}
+
+function Perform-DebloatEdge {
+    Write-OutputToTextBox "Attempting to debloat Microsoft Edge..." "Blue"
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate" -Name "CreateDesktopShortcutDefault" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "PersonalizationReportingEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "ShowRecommendationsEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "HideFirstRunExperience" -Value 1 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "UserFeedbackAllowed" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "ConfigureDoNotTrack" -Value 1 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "AlternateErrorPagesEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "EdgeCollectionsEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "EdgeShoppingAssistantEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "MicrosoftEdgeInsiderPromotionEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "PersonalizationReportingEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "ShowMicrosoftRewards" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "WebWidgetAllowed" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "DiagnosticData" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "EdgeAssetDeliveryServiceEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "EdgeCollectionsEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "CryptoWalletEnabled" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "WalletDonationEnabled" -Value 0 -Type DWord
+}
+
+function Perform-AdobeDebloatServices {
+    Write-OutputToTextBox "Attempting to optimize Adobe services startup types..." "Blue"
+    $adobeServicesToOptimize = @{
+        "AGSService" = "Disabled";
+        "AGMService" = "Disabled";
+        "AdobeUpdateService" = "Manual"; # Display Name might be "Adobe Acrobat Update Service"
+        "Adobe Acrobat Update" = "Manual"; # Display Name might be "Adobe Acrobat Update Service"
+        "Adobe Genuine Monitor Service" = "Disabled";
+        "AdobeARMservice" = "Manual";
+        "Adobe Licensing Console" = "Manual";
+        "CCXProcess" = "Manual";
+        "AdobeIPCBroker" = "Manual";
+        "CoreSync" = "Manual"
+    }
+    foreach ($servicePattern in $adobeServicesToOptimize.Keys) {
+        Set-ServiceStartupType -ServicePattern $servicePattern -StartupType $adobeServicesToOptimize[$servicePattern]
+    }
+}
+
+function Perform-CCStopper {
+    Write-OutputToTextBox "Attempting to disable Adobe Desktop Service..." "Blue"
+    $path = "C:\Program Files (x86)\Common Files\Adobe\Adobe Desktop Common\ADS\Adobe Desktop Service.exe"
+
+    try {
+        if (Test-Path $path) {
+            # The admin check is now at the beginning of the script.
+            Write-OutputToTextBox "Taking ownership of '$path'..." "Blue"
+            & Takeown /f "$path" | Out-Null
+            Write-OutputToTextBox "Setting ACL for '$path'..." "Blue"
+            $acl = Get-Acl $path
+            $acl.SetOwner([System.Security.Principal.NTAccount]"Administrators")
+            $acl | Set-Acl $path -ErrorAction Stop
+
+            Write-OutputToTextBox "Renaming 'Adobe Desktop Service.exe'..." "Blue"
+            Rename-Item -Path $path -NewName "Adobe Desktop Service.exe.old" -Force -ErrorAction Stop
+            Write-OutputToTextBox "Adobe Desktop Service has been disabled." "Green"
+        } else {
+            Write-OutputToTextBox "Adobe Desktop Service is not in the default location or does not exist." "Yellow"
+        }
+    } catch {
+        Write-OutputToTextBox "Error performing CCStopper: $($_.Exception.Message)" "Red"
+    }
+}
+
+function Perform-AcrobatUpdates {
+    Write-OutputToTextBox "Attempting to disable Acrobat automatic updates..." "Blue"
+    $rootPath = "HKLM:\SOFTWARE\WOW6432Node\Adobe\Adobe ARM\Legacy\Acrobat"
+
+    try {
+        if (-not (Test-Path $rootPath)) {
+            Write-OutputToTextBox "Adobe Acrobat registry path '$rootPath' not found." "Yellow"
+            return
+        }
+        # Get all subkeys under the specified root path that match the dynamic pattern
+        $subKeys = Get-ChildItem -Path $rootPath | Where-Object { $_.PSChildName -like "{*}" }
+
+        if ($subKeys.Count -eq 0) {
+            Write-OutputToTextBox "No Acrobat installations found under '$rootPath'." "Yellow"
+            return
+        }
+
+        # Loop through each subkey
+        foreach ($subKey in $subKeys) {
+            $fullPath = Join-Path -Path $rootPath -ChildPath $subKey.PSChildName
+            try {
+                Set-ItemProperty -Path $fullPath -Name "Mode" -Value 0 -Force -ErrorAction Stop
+                Write-OutputToTextBox "Acrobat Updates have been disabled for '$($subKey.PSChildName)'." "Green"
+            } catch {
+                Write-OutputToTextBox "Error setting Acrobat Updates for '$($subKey.PSChildName)': $($_.Exception.Message)" "Red"
+            }
+        }
+    } catch {
+        Write-OutputToTextBox "Error during Acrobat Updates disable process: $($_.Exception.Message)" "Red"
+    }
+}
+
+function Perform-DisableTeredo {
+    Write-OutputToTextBox "Attempting to disable Teredo..." "Blue"
+    Set-RegistryValue -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" -Name "DisabledComponents" -Value 1 -Type DWord
+    try {
+        # The admin check is now at the beginning of the script.
+        & netsh interface teredo set state disabled | Out-Null
+        Write-OutputToTextBox "Teredo state set to disabled using netsh." "Green"
+    } catch {
+        Write-OutputToTextBox "Error disabling Teredo via netsh: $($_.Exception.Message)" "Red"
+    }
+}
+
+function Perform-DisableBackgroundApps {
+    Write-OutputToTextBox "Attempting to disable Background Apps..." "Blue"
+    Set-RegistryValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 1 -Type DWord
+}
+
+#endregion
+
+# Run Button Click Event Handler
+$runButton.Add_Click({
+    # Clear previous output
+    $outputTextBox.Text = ""
+    # Hide options panel and show output/progress panel
+    $optionsPanel.Visibility = "Collapsed"
+    $outputAndProgressBarPanel.Visibility = "Visible" # Make the output and progress panel visible
+    $runButton.IsEnabled = $False # Disable button during execution (Changed to $False)
+
+    Write-OutputToTextBox "Starting Windows Optimization Process..." "Orange"
+    Write-OutputToTextBox "Please ensure you are running this script with Administrator privileges for full functionality." "Orange"
+    Write-OutputToTextBox "----------------------------------------------------`n"
+
+    # Define all major categories for progress bar tracking
+    # Each 'if' block below should correspond to one increment of progress
+    $majorCategories = @(
+        $window.FindName("CheckBox_DeleteTempFiles").IsChecked,
+        $window.FindName("CheckBox_DisableConsumerFeatures").IsChecked,
+        ($window.FindName("CheckBox_DisableScheduledTasks").IsChecked -or $window.FindName("CheckBox_SetTelemetryRegistry").IsChecked -or $window.FindName("CheckBox_DisableActivityHistory").IsChecked -or $window.FindName("CheckBox_DisableLocationTracking").IsChecked -or $window.FindName("CheckBox_DisableStorageSense").IsChecked -or $window.FindName("CheckBox_DisableWifiSense").IsChecked -or $window.FindName("CheckBox_DisableRecall").IsChecked), # Telemetry & Privacy Group
+        $window.FindName("CheckBox_DisableGameDVR").IsChecked,
+        $window.FindName("CheckBox_DisableHibernation").IsChecked,
+        $window.FindName("CheckBox_DisableHomegroup").IsChecked,
+        $window.FindName("CheckBox_SetServices").IsChecked,
+        $window.FindName("CheckBox_DebloatEdge").IsChecked,
+        ($window.FindName("CheckBox_AdobeServices").IsChecked -or $window.FindName("CheckBox_CCStopper").IsChecked -or $window.FindName("CheckBox_AcrobatUpdates").IsChecked), # Adobe Debloat Group
+        $window.FindName("CheckBox_DisableTeredo").IsChecked,
+        $window.FindName("CheckBox_DisableBackgroundApps").IsChecked
+    )
+
+    $totalSelectedCategories = ($majorCategories | Where-Object { $_ -eq $True }).Count # Changed to $True
+    $completedCategories = 0
+
+    if ($totalSelectedCategories -eq 0) {
+        Write-OutputToTextBox "No optimization categories selected. Please choose at least one option." "Yellow"
+        $overallProgressBar.Value = 0
+        $overallProgressBar.Visibility = "Collapsed"
+        $outputAndProgressBarPanel.Visibility = "Collapsed" # Hide output panel if nothing ran
+        $runButton.IsEnabled = $True # Changed to $True
+        $optionsPanel.Visibility = "Visible"
+        return # Exit early if nothing is selected
+    }
+
+    $overallProgressBar.Maximum = 100
+    $overallProgressBar.Value = 0
+    # ProgressBar is already within OutputAndProgressBarPanel which is now visible
+    
+    # Helper for updating progress bar
+    function Update-ProgressBar {
+        param([int]$Completed, [int]$Total)
+        if ($Total -gt 0) {
+            $percentage = ($Completed / $Total) * 100
+            $overallProgressBar.Dispatcher.Invoke([Action[double]]{
+                param($val)
+                $overallProgressBar.Value = $val
+            }, $percentage)
+        }
+    }
+
+    # Execute selected optimizations
+    if ($window.FindName("CheckBox_DeleteTempFiles").IsChecked) {
+        Write-OutputToTextBox "--- Starting Category: Delete Temporary Files ---" "Blue"
+        Perform-DeleteTemporaryFiles
+        Write-OutputToTextBox "--- Finished Category: Delete Temporary Files ---`n" "Blue"
+        $completedCategories++
+        Update-ProgressBar -Completed $completedCategories -Total $totalSelectedCategories
+    }
+    if ($window.FindName("CheckBox_DisableConsumerFeatures").IsChecked) {
+        Write-OutputToTextBox "--- Starting Category: Disable Consumer Features ---" "Blue"
+        Perform-DisableConsumerFeatures
+        Write-OutputToTextBox "--- Finished Category: Disable Consumer Features ---`n" "Blue"
+        $completedCategories++
+        Update-ProgressBar -Completed $completedCategories -Total $totalSelectedCategories
+    }
+    if ($window.FindName("CheckBox_DisableScheduledTasks").IsChecked -or $window.FindName("CheckBox_SetTelemetryRegistry").IsChecked -or $window.FindName("CheckBox_DisableActivityHistory").IsChecked -or $window.FindName("CheckBox_DisableLocationTracking").IsChecked -or $window.FindName("CheckBox_DisableStorageSense").IsChecked -or $window.FindName("CheckBox_DisableWifiSense").IsChecked -or $window.FindName("CheckBox_DisableRecall").IsChecked) {
+        Write-OutputToTextBox "--- Starting Category: Disable Telemetry & Privacy ---" "Blue"
+        Perform-DisableTelemetry # This function now encapsulates all telemetry tweaks
+        # The following are called here because they are separate functions in your original file,
+        # but grouped under 'Telemetry & Privacy' in the GUI checkbox group.
+        Perform-DisableActivityHistory
+        Perform-DisableLocationTracking
+        Perform-DisableStorageSense
+        Perform-DisableWifiSense
+        Perform-DisableRecall
+        Write-OutputToTextBox "--- Finished Category: Disable Telemetry & Privacy ---`n" "Blue"
+        $completedCategories++
+        Update-ProgressBar -Completed $completedCategories -Total $totalSelectedCategories
+    }
+    if ($window.FindName("CheckBox_DisableGameDVR").IsChecked) {
+        Write-OutputToTextBox "--- Starting Category: Disable GameDVR ---" "Blue"
+        Perform-DisableGameDVR
+        Write-OutputToTextBox "--- Finished Category: Disable GameDVR ---`n" "Blue"
+        $completedCategories++
+        Update-ProgressBar -Completed $completedCategories -Total $totalSelectedCategories
+    }
+    if ($window.FindName("CheckBox_DisableHibernation").IsChecked) {
+        Write-OutputToTextBox "--- Starting Category: Disable Hibernation ---" "Blue"
+        Perform-DisableHibernation
+        Write-OutputToTextBox "--- Finished Category: Disable Hibernation ---`n" "Blue"
+        $completedCategories++
+        Update-ProgressBar -Completed $completedCategories -Total $totalSelectedCategories
+    }
+    if ($window.FindName("CheckBox_DisableHomegroup").IsChecked) {
+        Write-OutputToTextBox "--- Starting Category: Disable Homegroup ---" "Blue"
+        Perform-DisableHomegroup
+        Write-OutputToTextBox "--- Finished Category: Disable Homegroup ---`n" "Blue"
+        $completedCategories++
+        Update-ProgressBar -Completed $completedCategories -Total $totalSelectedCategories
+    }
+    if ($window.FindName("CheckBox_SetServices").IsChecked) {
+        Write-OutputToTextBox "--- Starting Category: Optimize Services Startup ---" "Blue"
+        Perform-SetServices
+        Write-OutputToTextBox "--- Finished Category: Optimize Services Startup ---`n" "Blue"
+        $completedCategories++
+        Update-ProgressBar -Completed $completedCategories -Total $totalSelectedCategories
+    }
+    if ($window.FindName("CheckBox_DebloatEdge").IsChecked) {
+        Write-OutputToTextBox "--- Starting Category: Debloat Microsoft Edge ---" "Blue"
+        Perform-DebloatEdge
+        Write-OutputToTextBox "--- Finished Category: Debloat Microsoft Edge ---`n" "Blue"
+        $completedCategories++
+        Update-ProgressBar -Completed $completedCategories -Total
+I understand that the output text box in your Windows Optimization GUI is still not scrolling, which is causing difficulty in viewing all the results.
+
+I will update the "Windows Optimization GUI (PowerShell WPF)" Canvas to properly enable scrolling for the `OutputTextBox`. The primary fix will be to ensure that the `TextBox` within its `Grid` container has a height constraint that allows it to activate its scrollbar when content overflows.
+
+Here's the updated PowerShell script in the Canvas:
+
+
+```powershell
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
+
+#region Execution Policy Adjustment for Remote Execution
+# This command sets the execution policy for the current PowerShell process to Bypass.
+# This is necessary when running scripts downloaded from the internet (like via irm | iex).
+# It will revert to the system's default policy when this PowerShell session closes.
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+#endregion
+
+#region Initial Administrator Check
+# Check if the script is running with Administrator privileges
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    [System.Windows.Forms.MessageBox]::Show("This script requires Administrator privileges to run all optimizations. Please right-click the script and choose 'Run as administrator'.", "Permission Denied", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Stop)
+    exit # Exit the script if not running as administrator
+}
+#endregion
+
+#region XAML Definition
+[xml]$xaml = @"
+<Window xmlns="[http://schemas.microsoft.com/winfx/2006/xaml/presentation](http://schemas.microsoft.com/winfx/2006/xaml/presentation)"
+        xmlns:x="[http://schemas.microsoft.com/winfx/2006/xaml](http://schemas.microsoft.com/winfx/2006/xaml)"
+        Title="Windows Optimization Tool" Height="700" Width="800"
+        WindowStartupLocation="CenterScreen"
+        Background="#F5F5F5">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/> <!-- For title TextBlock -->
+            <RowDefinition Height="*"/>    <!-- For main content (Options OR Output/Progress) -->
+            <RowDefinition Height="Auto"/> <!-- For buttons -->
+        </Grid.RowDefinitions>
+
+        <!-- Top TextBlock -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,10">
+            <TextBlock Text="Select optimization tweaks to apply:" FontSize="16" FontWeight="Bold" Margin="0,0,0,10"/>
+        </StackPanel>
+
+        <!-- Main Content Area: Options Panel (Visible by default) -->
+        <ScrollViewer Grid.Row="1" x:Name="OptionsPanel" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                      Visibility="Visible">
+            <StackPanel>
+                <!-- Delete Temporary Files -->
+                <GroupBox Header="Delete Temporary Files" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                    <CheckBox x:Name="CheckBox_DeleteTempFiles" Content="Delete temporary files from C:\Windows\Temp and user TEMP directory" IsChecked="True"
+                              ToolTip="Deletes files from C:\Windows\Temp and your user's temporary folder (%TEMP%). This is generally safe and frees up disk space."/>
+                </GroupBox>
+
+                <!-- Disable Consumer Features -->
+                <GroupBox Header="Disable Consumer Features" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                    <CheckBox x:Name="CheckBox_DisableConsumerFeatures" Content="Disable Windows Consumer Features" IsChecked="True"
+                              ToolTip="Disables suggested content, advertisements, and pre-installed apps from Microsoft."/>
+                </GroupBox>
+
+                <!-- Disable Telemetry & Privacy -->
+                <GroupBox Header="Disable Telemetry &amp; Privacy" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                    <StackPanel>
+                        <CheckBox x:Name="CheckBox_DisableScheduledTasks" Content="Disable Telemetry Scheduled Tasks" IsChecked="True"
+                                  ToolTip="Disables various scheduled tasks related to data collection, telemetry, and customer experience improvement programs."/>
+                        <CheckBox x:Name="CheckBox_SetTelemetryRegistry" Content="Set Telemetry-related Registry Keys to 0" IsChecked="True"
+                                  ToolTip="Modifies multiple registry entries to reduce telemetry, data collection, and content delivery features."/>
+                        <CheckBox x:Name="CheckBox_DisableActivityHistory" Content="Disable Activity History" IsChecked="True"
+                                  ToolTip="Prevents Windows from collecting and publishing your activity history across devices."/>
+                        <CheckBox x:Name="CheckBox_DisableLocationTracking" Content="Disable Location Tracking" IsChecked="True"
+                                  ToolTip="Disables system-wide location tracking, sensor services, and automatic map updates."/>
+                        <CheckBox x:Name="CheckBox_DisableStorageSense" Content="Disable Storage Sense" IsChecked="True"
+                                  ToolTip="Turns off Storage Sense, which automatically frees up space by deleting temporary files and managing Recycle Bin content."/>
+                        <CheckBox x:Name="CheckBox_DisableWifiSense" Content="Disable Wi-Fi Sense" IsChecked="True"
+                                  ToolTip="Disables automatic connection to Wi-Fi Sense hotspots and reporting of Wi-Fi networks."/>
+                        <CheckBox x:Name="CheckBox_DisableRecall" Content="Disable Recall (Windows AI Data Analysis)" IsChecked="True"
+                                  ToolTip="Disables Windows AI Data Analysis features, including the controversial Recall functionality (if present on your system)."/>
+                    </StackPanel>
+                </GroupBox>
+
+                <!-- Disable GameDVR -->
+                <GroupBox Header="Disable GameDVR" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                    <CheckBox x:Name="CheckBox_DisableGameDVR" Content="Disable Game DVR and Game Bar features" IsChecked="True"
+                              ToolTip="Turns off Game DVR, Game Bar, and related features that record gameplay in the background, potentially improving gaming performance."/>
+                </GroupBox>
+
+                <!-- Disable Hibernation -->
+                <GroupBox Header="Disable Hibernation" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                    <CheckBox x:Name="CheckBox_DisableHibernation" Content="Disable Hibernation (frees up disk space)" IsChecked="True"
+                              ToolTip="Disables the hibernation feature, which can free up significant disk space by removing the hiberfil.sys file. Note: This will remove the 'Hibernate' option from power menus."/>
+                </GroupBox>
+
+                <!-- Disable Homegroup -->
+                <GroupBox Header="Disable Homegroup" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                    <CheckBox x:Name="CheckBox_DisableHomegroup" Content="Set Homegroup services to Manual" IsChecked="True"
+                              ToolTip="Sets Homegroup-related services to Manual. Homegroup is a deprecated feature in modern Windows versions and can be safely disabled if not used."/>
+                </GroupBox>
+
+                <!-- Set Services to Manual/Automatic -->
+                <GroupBox Header="Optimize Services Startup" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                    <CheckBox x:Name="CheckBox_SetServices" Content="Set various Windows services to Manual, Automatic, or Disabled" IsChecked="True"
+                              ToolTip="Adjusts the startup type (Automatic, Manual, Disabled) for numerous Windows services to optimize performance and reduce background activity. Some services may be protected and cannot be changed."/>
+                </GroupBox>
+
+                <!-- Debloat Edge -->
+                <GroupBox Header="Debloat Microsoft Edge" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                    <CheckBox x:Name="CheckBox_DebloatEdge" Content="Disable various Edge features, personalization, and telemetry" IsChecked="True"
+                              ToolTip="Modifies Microsoft Edge settings in the registry to disable features like desktop shortcuts, personalization, recommendations, shopping assistant, and diagnostic data."/>
+                </GroupBox>
+
+                <!-- Adobe Debloat -->
+                <GroupBox Header="Adobe Debloat" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                    <StackPanel>
+                        <CheckBox x:Name="CheckBox_AdobeServices" Content="Set various Adobe services to Manual or Disabled" IsChecked="True"
+                                  ToolTip="Adjusts startup types for various Adobe background services (e.g., update services, genuine monitor, Creative Cloud components) to Manual or Disabled."/>
+                        <CheckBox x:Name="CheckBox_CCStopper" Content="Rename Adobe Desktop Service.exe to prevent it from running" IsChecked="True"
+                                  ToolTip="Attempts to disable the Adobe Desktop Service by renaming its executable, preventing it from running in the background. Requires administrator privileges."/>
+                        <CheckBox x:Name="CheckBox_AcrobatUpdates" Content="Disable Acrobat automatic updates" IsChecked="True"
+                                  ToolTip="Disables automatic updates for Adobe Acrobat products by modifying registry settings. You will need to manually check for updates if you wish to update."/>
+                    </StackPanel>
+                </GroupBox>
+
+                <!-- Disable Teredo -->
+                <GroupBox Header="Disable Teredo" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                    <CheckBox x:Name="CheckBox_DisableTeredo" Content="Disable Teredo tunneling interface" IsChecked="True"
+                              ToolTip="Disables the Teredo tunneling interface, which is used for IPv6 connectivity over IPv4 networks. This is often not needed in most modern network setups and can be safely disabled."/>
+                </GroupBox>
+
+                <!-- Disable Background Apps -->
+                <GroupBox Header="Disable Background Apps" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                    <CheckBox x:Name="CheckBox_DisableBackgroundApps" Content="Disable background applications globally" IsChecked="True"
+                              ToolTip="Turns off background app access globally for Universal Windows Platform (UWP) apps, preventing them from consuming resources when not actively used."/>
+                </GroupBox>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Main Content Area: Output and Progress Panel (Collapsed by default) -->
+        <Grid Grid.Row="1" x:Name="OutputAndProgressBarPanel" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/> <!-- For ProgressBar -->
+                <RowDefinition Height="*"/>    <!-- For OutputTextBox -->
+            </Grid.RowDefinitions>
+            <ProgressBar x:Name="OverallProgressBar" Grid.Row="0" Height="20" Margin="0,10,0,10"
+                         Foreground="#4CAF50" Background="#E0E0E0" BorderBrush="#CCCCCC" BorderThickness="1"/>
+            <TextBox x:Name="OutputTextBox" Grid.Row="1" VerticalAlignment="Stretch" HorizontalAlignment="Stretch"
+                     TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" IsReadOnly="True" MinHeight="100"/>
         </Grid>
         
         <!-- Buttons Panel -->
