@@ -244,13 +244,12 @@ function Disable-ScheduledTask {
     )
     try {
         # Get the scheduled task to ensure it exists and to get its properties
-        # We don't need to manually parse TaskName and TaskFolder if we can get the object directly.
         $task = Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue
         
         if ($task) {
-            # Pipe the task object directly to the built-in cmdlet.
-            # This is generally more robust as the cmdlet can bind to properties of the object.
-            $task | Microsoft.PowerShell.ScheduledJob\Disable-ScheduledTask -ErrorAction Stop
+            # Explicitly pass TaskName and TaskPath (folder path) to the built-in cmdlet.
+            # $task.Path refers to the folder path, not the full task path with name.
+            Microsoft.PowerShell.ScheduledJob\Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.Path -ErrorAction Stop
             Write-OutputToTextBox "Successfully disabled scheduled task: $TaskPath" "Green"
         } else {
             Write-OutputToTextBox "Scheduled task '$TaskPath' not found. It might not exist on this system or the path is incorrect." "Yellow"
