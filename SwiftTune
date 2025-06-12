@@ -2,7 +2,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 
 #region Initial Administrator Check
 # Check if the script is running with Administrator privileges
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) { # Corrected type reference
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
     [System.Windows.Forms.MessageBox]::Show("This script requires Administrator privileges to run all optimizations. Please right-click the script and choose 'Run as administrator'.", "Permission Denied", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Stop)
     exit # Exit the script if not running as administrator
 }
@@ -17,17 +17,20 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
         Background="#F5F5F5">
     <Grid Margin="10">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/> <!-- For title TextBlock -->
+            <RowDefinition Height="*"/>    <!-- For main content (Options OR Output/Progress) -->
+            <RowDefinition Height="Auto"/> <!-- For buttons -->
         </Grid.RowDefinitions>
 
+        <!-- Top TextBlock -->
         <StackPanel Grid.Row="0" Margin="0,0,0,10">
             <TextBlock Text="Select optimization tweaks to apply:" FontSize="16" FontWeight="Bold" Margin="0,0,0,10"/>
         </StackPanel>
 
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-            <StackPanel x:Name="OptionsPanel">
+        <!-- Main Content Area: Options Panel (Visible by default) -->
+        <ScrollViewer Grid.Row="1" x:Name="OptionsPanel" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                      Visibility="Visible">
+            <StackPanel>
                 <!-- Delete Temporary Files -->
                 <GroupBox Header="Delete Temporary Files" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
                     <CheckBox x:Name="CheckBox_DeleteTempFiles" Content="Delete temporary files from C:\Windows\Temp and user TEMP directory" IsChecked="True"
@@ -113,20 +116,22 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
                     <CheckBox x:Name="CheckBox_DisableBackgroundApps" Content="Disable background applications globally" IsChecked="True"
                               ToolTip="Turns off background app access globally for Universal Windows Platform (UWP) apps, preventing them from consuming resources when not actively used."/>
                 </GroupBox>
-
             </StackPanel>
         </ScrollViewer>
 
+        <!-- Main Content Area: Output and Progress Panel (Collapsed by default) -->
+        <StackPanel Grid.Row="1" x:Name="OutputAndProgressBarPanel" Visibility="Collapsed">
+            <ProgressBar x:Name="OverallProgressBar" Height="20" Margin="0,10,0,10"
+                         Foreground="#4CAF50" Background="#E0E0E0" BorderBrush="#CCCCCC" BorderThickness="1"/>
+            <TextBox x:Name="OutputTextBox" VerticalAlignment="Stretch" HorizontalAlignment="Stretch"
+                     TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" IsReadOnly="True"
+                     Background="#E0E0E0" Foreground="#333333" FontFamily="Consolas" FontSize="12"/>
+        </StackPanel>
+        
+        <!-- Buttons Panel -->
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
             <Button x:Name="RunButton" Content="Run Optimizations" Width="150" Height="30" Margin="0,0,10,0" Background="#4CAF50" Foreground="White" FontWeight="Bold"/>
         </StackPanel>
-        
-        <ProgressBar x:Name="OverallProgressBar" Grid.Row="2" Height="20" Margin="0,50,0,0" Visibility="Collapsed"
-                     Foreground="#4CAF50" Background="#E0E0E0" BorderBrush="#CCCCCC" BorderThickness="1"/>
-
-        <TextBox x:Name="OutputTextBox" Grid.Row="0" Grid.RowSpan="3" VerticalAlignment="Stretch" HorizontalAlignment="Stretch"
-                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" IsReadOnly="True" Margin="0,0,0,0"
-                 Background="#E0E0E0" Foreground="#333333" FontFamily="Consolas" FontSize="12" Visibility="Collapsed"/>
     </Grid>
 </Window>
 "@
@@ -139,7 +144,8 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 $runButton = $window.FindName("RunButton")
 $outputTextBox = $window.FindName("OutputTextBox")
 $optionsPanel = $window.FindName("OptionsPanel")
-$overallProgressBar = $window.FindName("OverallProgressBar") # Get reference to the progress bar
+$overallProgressBar = $window.FindName("OverallProgressBar")
+$outputAndProgressBarPanel = $window.FindName("OutputAndProgressBarPanel") # Get reference to the new panel
 
 #region Helper Functions
 function Write-OutputToTextBox {
@@ -227,20 +233,17 @@ function Set-ServiceStartupType {
 
 function Disable-ScheduledTask {
     param (
-        [string]$TaskPath
+        [string]$TaskPath # This is the full path like "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser"
     )
     try {
-        # For scheduled tasks, Get-ScheduledTask only works with the actual path, not always display name.
-        # It's also possible the task path is missing the leading backslash for root tasks.
-        $fullTaskPath = $TaskPath
-        if (-not $fullTaskPath.StartsWith('\')) {
-            $fullTaskPath = '\' + $fullTaskPath
-        }
-
-        $task = Get-ScheduledTask -TaskPath $fullTaskPath -ErrorAction SilentlyContinue
+        # Get the scheduled task to ensure it exists and to get its properties
+        # We don't need to manually parse TaskName and TaskFolder if we can get the object directly.
+        $task = Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue
+        
         if ($task) {
-            # Explicitly call the built-in cmdlet using its full name, passing TaskName directly
-            Microsoft.PowerShell.ScheduledJob\Disable-ScheduledTask -TaskName $task.TaskName -ErrorAction Stop
+            # Pipe the task object directly to the built-in cmdlet.
+            # This is generally more robust as the cmdlet can bind to properties of the object.
+            $task | Microsoft.PowerShell.ScheduledJob\Disable-ScheduledTask -ErrorAction Stop
             Write-OutputToTextBox "Successfully disabled scheduled task: $TaskPath" "Green"
         } else {
             Write-OutputToTextBox "Scheduled task '$TaskPath' not found. It might not exist on this system or the path is incorrect." "Yellow"
@@ -778,10 +781,9 @@ function Perform-DisableBackgroundApps {
 $runButton.Add_Click({
     # Clear previous output
     $outputTextBox.Text = ""
-    # Show output box
-    $outputTextBox.Visibility = "Visible"
-    # Hide options panel temporarily
+    # Hide options panel and show output/progress panel
     $optionsPanel.Visibility = "Collapsed"
+    $outputAndProgressBarPanel.Visibility = "Visible" # Make the output and progress panel visible
     $runButton.IsEnabled = $false # Disable button during execution
 
     Write-OutputToTextBox "Starting Windows Optimization Process..." "Orange"
@@ -811,15 +813,16 @@ $runButton.Add_Click({
         Write-OutputToTextBox "No optimization categories selected. Please choose at least one option." "Yellow"
         $overallProgressBar.Value = 0
         $overallProgressBar.Visibility = "Collapsed"
-        $runButton.IsEnabled = $true
+        $outputAndProgressBarPanel.Visibility = "Collapsed" # Hide output panel if nothing ran
+        $runButton.IsEnabled = true
         $optionsPanel.Visibility = "Visible"
         return # Exit early if nothing is selected
     }
 
     $overallProgressBar.Maximum = 100
     $overallProgressBar.Value = 0
-    $overallProgressBar.Visibility = "Visible"
-
+    # ProgressBar is already within OutputAndProgressBarPanel which is now visible
+    
     # Helper for updating progress bar
     function Update-ProgressBar {
         param([int]$Completed, [int]$Total)
@@ -925,7 +928,7 @@ $runButton.Add_Click({
     $overallProgressBar.Value = 100 # Ensure it's full at the end
     Start-Sleep -Milliseconds 500 # Small pause to see 100%
     $overallProgressBar.Visibility = "Collapsed" # Hide when done
-    $runButton.IsEnabled = $true # Re-enable button
+    $runButton.IsEnabled = true # Re-enable button
     $optionsPanel.Visibility = "Visible" # Show options again after completion
 })
 
