@@ -1,5 +1,12 @@
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 
+#region Execution Policy Adjustment for Remote Execution
+# This command sets the execution policy for the current PowerShell process to Bypass.
+# This is necessary when running scripts downloaded from the internet (like via irm | iex).
+# It will revert to the system's default policy when this PowerShell session closes.
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+#endregion
+
 #region Initial Administrator Check
 # Check if the script is running with Administrator privileges
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -377,7 +384,7 @@ function Perform-DisableLocationTracking {
 
 function Perform-DisableStorageSense {
     Write-OutputToTextBox "Attempting to disable Storage Sense..." "Blue"
-    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" -Name "01" -Value 0 -Type DWord
+    Set-RegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" -Name "01" -Value 0 -Type Dword
 }
 
 function Perform-DisableWifiSense {
