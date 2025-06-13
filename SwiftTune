@@ -9,7 +9,7 @@
 
 .NOTES
     Author: Gemini
-    Version: 1.0
+    Version: 1.6
     Instructions: Run this script as an Administrator.
 #>
 
@@ -84,11 +84,30 @@ function Set-RegValue {
     }
 }
 
+# --- Helper for setting service startup types ---
+function Set-ServiceStatus {
+    param(
+        [string]$Name,
+        [string]$StartupType,
+        [System.Windows.Forms.RichTextBox]$OutputBox
+    )
+    try {
+        $svc = Get-Service -Name $name -ErrorAction Stop
+        if ($svc) {
+            Write-Log -Message "Setting service '$($svc.Name)' to $startupType" -OutputBox $OutputBox -Color 'Cyan'
+            Set-Service -Name $svc.Name -StartupType $startupType -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-Log -Message "INFO: Service '$name' not found or couldn't be changed." -OutputBox $OutputBox -Color 'Gray'
+    }
+}
+
 # --- Tweak Functions ---
 
 function Invoke-DeleteTempFiles {
     param($OutputBox)
-    Write-Log -Message "--- Deleting Temporary Files ---" -OutputBox $OutputBox
+    Write-Log -Message "--- Deleting Temporary Files ---" -OutputBox $OutputBox -Color 'Gold'
     $paths = "C:\Windows\Temp", $env:TEMP
     foreach ($p in $paths) {
         Write-Log -Message "Cleaning folder: $p" -OutputBox $OutputBox -Color 'Cyan'
@@ -99,27 +118,12 @@ function Invoke-DeleteTempFiles {
 
 function Invoke-DisableTelemetry {
     param($OutputBox)
-    Write-Log -Message "--- Disabling Telemetry & Consumer Features ---" -OutputBox $OutputBox
-    
+    Write-Log -Message "--- Disabling Telemetry & Consumer Features ---" -OutputBox $OutputBox -Color 'Gold'
     # Disable Scheduled Tasks
-    $tasks = @(
-        "Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
-        "Microsoft\Windows\Application Experience\ProgramDataUpdater",
-        "Microsoft\Windows\Autochk\Proxy",
-        "Microsoft\Windows\Customer Experience Improvement Program\Consolidator",
-        "Microsoft\Windows\Customer Experience Improvement Program\UsbCeip",
-        "Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector",
-        "Microsoft\Windows\Feedback\Siuf\DmClient",
-        "Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload",
-        "Microsoft\Windows\Windows Error Reporting\QueueReporting",
-        "Microsoft\Windows\Application Experience\MareBackup",
-        "Microsoft\Windows\Application Experience\StartupAppTask",
-        "Microsoft\Windows\Application Experience\PcaPatchDbTask",
-        "Microsoft\Windows\Maps\MapsUpdateTask"
-    )
+    $tasks = "Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser", "Microsoft\Windows\Application Experience\ProgramDataUpdater", "Microsoft\Windows\Autochk\Proxy", "Microsoft\Windows\Customer Experience Improvement Program\Consolidator", "Microsoft\Windows\Customer Experience Improvement Program\UsbCeip", "Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector", "Microsoft\Windows\Feedback\Siuf\DmClient", "Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload", "Microsoft\Windows\Windows Error Reporting\QueueReporting", "Microsoft\Windows\Application Experience\MareBackup", "Microsoft\Windows\Application Experience\StartupAppTask", "Microsoft\Windows\Application Experience\PcaPatchDbTask", "Microsoft\Windows\Maps\MapsUpdateTask"
     foreach ($task in $tasks) {
         Write-Log -Message "Disabling scheduled task: $task" -OutputBox $OutputBox -Color 'Cyan'
-        Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue
+        Get-ScheduledTask -TaskPath "\$task" -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue
     }
 
     # Registry Tweaks
@@ -128,23 +132,18 @@ function Invoke-DisableTelemetry {
     Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -Value 0 -OutputBox $OutputBox
     Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "ContentDeliveryAllowed" -Value 0 -OutputBox $OutputBox
     Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "OemPreInstalledAppsEnabled" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "PreInstalledAppsEnabled" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "PreInstalledAppsEverEnabled" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SilentInstalledAppsEnabled" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SubscribedContent-338387Enabled" -Value 0 -OutputBox $OutputBox
     Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowTaskViewButton" -Value 0 -OutputBox $OutputBox
     Set-RegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -OutputBox $OutputBox
     Set-RegValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "SystemResponsiveness" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 4294967295 -Type DWord -OutputBox $OutputBox
+    Set-RegValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 0xFFFFFFFF -Type DWord -OutputBox $OutputBox
     Set-RegValue -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value 1 -Type String -OutputBox $OutputBox
     Set-RegValue -Path "HKCU:\Control Panel\Desktop" -Name "AutoEndTasks" -Value 1 -Type String -OutputBox $OutputBox
-    
     Write-Log -Message "Telemetry and Consumer Features disabled." -OutputBox $OutputBox
 }
 
 function Invoke-DisableActivityHistory {
     param($OutputBox)
-    Write-Log -Message "--- Disabling Activity History ---" -OutputBox $OutputBox
+    Write-Log -Message "--- Disabling Activity History ---" -OutputBox $OutputBox -Color 'Gold'
     Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableActivityFeed" -Value 0 -OutputBox $OutputBox
     Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "PublishUserActivities" -Value 0 -OutputBox $OutputBox
     Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "UploadUserActivities" -Value 0 -OutputBox $OutputBox
@@ -153,7 +152,7 @@ function Invoke-DisableActivityHistory {
 
 function Invoke-DisableGameDVR {
     param($OutputBox)
-    Write-Log -Message "--- Disabling Game DVR ---" -OutputBox $OutputBox
+    Write-Log -Message "--- Disabling Game DVR ---" -OutputBox $OutputBox -Color 'Gold'
     Set-RegValue -Path "HKCU:\System\GameConfigStore" -Name "GameDVR_Enabled" -Value 0 -OutputBox $OutputBox
     Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" -Name "AllowGameDVR" -Value 0 -OutputBox $OutputBox
     Write-Log -Message "Game DVR disabled." -OutputBox $OutputBox
@@ -161,7 +160,7 @@ function Invoke-DisableGameDVR {
 
 function Invoke-DisableHibernation {
     param($OutputBox)
-    Write-Log -Message "--- Disabling Hibernation ---" -OutputBox $OutputBox
+    Write-Log -Message "--- Disabling Hibernation ---" -OutputBox $OutputBox -Color 'Gold'
     powercfg -h off
     Set-RegValue -Path "HKLM:\System\CurrentControlSet\Control\Session Manager\Power" -Name "HibernateEnabled" -Value 0 -OutputBox $OutputBox
     Write-Log -Message "Hibernation disabled." -OutputBox $OutputBox
@@ -169,49 +168,15 @@ function Invoke-DisableHibernation {
 
 function Invoke-OptimizeServices {
     param($OutputBox)
-    Write-Log -Message "--- Optimizing Services ---" -OutputBox $OutputBox
-    $services = @{
-        "AJRouter" = "Disabled"
-        "ALG" = "Manual"
-        "AppVClient" = "Disabled"
-        "AppXSvc" = "Manual"
-        "AxInstSV" = "Manual"
-        "BcastDVRUserService_*" = "Manual" # Wildcard
-        "BITS" = "AutomaticDelayedStart"
-        "Browser" = "Manual"
-        "diagsvc" = "Manual"
-        "DiagTrack" = "Disabled" # Another name for Connected User Experiences
-        "dmwappushservice" = "Manual"
-        "Fax" = "Manual"
-        "HomeGroupListener" = "Manual"
-        "HomeGroupProvider" = "Manual"
-        "RemoteRegistry" = "Disabled"
-        "ssh-agent" = "Disabled"
-        "TapiSrv" = "Manual"
-        "tzautoupdate" = "Disabled"
-        "UevAgentService" = "Disabled"
-        "wuauserv" = "Manual"
-    }
-    
-    foreach ($name in $services.Keys) {
-        $startupType = $services[$name]
-        try {
-            $svc = Get-Service -Name $name -ErrorAction Stop
-            if ($svc) {
-                Write-Log -Message "Setting service '$($svc.Name)' to $startupType" -OutputBox $OutputBox -Color 'Cyan'
-                Set-Service -Name $svc.Name -StartupType $startupType -ErrorAction Stop
-            }
-        }
-        catch {
-             Write-Log -Message "INFO: Service '$name' not found or couldn't be changed." -OutputBox $OutputBox -Color 'Gray'
-        }
-    }
+    Write-Log -Message "--- Optimizing Services ---" -OutputBox $OutputBox -Color 'Gold'
+    $services = @{"AJRouter" = "Disabled"; "ALG" = "Manual"; "AppVClient" = "Disabled"; "AppXSvc" = "Manual"; "AxInstSV" = "Manual"; "BcastDVRUserService_*" = "Manual"; "BITS" = "AutomaticDelayedStart"; "Browser" = "Manual"; "diagsvc" = "Manual"; "DiagTrack" = "Disabled"; "dmwappushservice" = "Manual"; "Fax" = "Manual"; "HomeGroupListener" = "Manual"; "HomeGroupProvider" = "Manual"; "RemoteRegistry" = "Disabled"; "ssh-agent" = "Disabled"; "TapiSrv" = "Manual"; "tzautoupdate" = "Disabled"; "UevAgentService" = "Disabled"; "wuauserv" = "Manual"}
+    foreach ($name in $services.Keys) { Set-ServiceStatus -Name $name -StartupType $services[$name] -OutputBox $OutputBox }
     Write-Log -Message "Service optimization complete." -OutputBox $OutputBox
 }
 
 function Invoke-DebloatEdge {
     param($OutputBox)
-    Write-Log -Message "--- Debloating Microsoft Edge ---" -OutputBox $OutputBox
+    Write-Log -Message "--- Debloating Microsoft Edge ---" -OutputBox $OutputBox -Color 'Gold'
     Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "PersonalizationReportingEnabled" -Value 0 -OutputBox $OutputBox
     Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "ShowRecommendationsEnabled" -Value 0 -OutputBox $OutputBox
     Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "HideFirstRunExperience" -Value 1 -OutputBox $OutputBox
@@ -223,17 +188,70 @@ function Invoke-DebloatEdge {
 
 function Invoke-DisableTeredo {
     param($OutputBox)
-    Write-Log -Message "--- Disabling Teredo ---" -OutputBox $OutputBox
-    netsh interface teredo set state disabled
+    Write-Log -Message "--- Disabling Teredo ---" -OutputBox $OutputBox -Color 'Gold'
+    netsh interface teredo set state disabled | Out-Null
     Set-RegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" -Name "DisabledComponents" -Value 0x8e -OutputBox $OutputBox
     Write-Log -Message "Teredo disabled." -OutputBox $OutputBox
 }
 
 function Invoke-DisableBackgroundApps {
     param($OutputBox)
-    Write-Log -Message "--- Disabling Background Apps ---" -OutputBox $OutputBox
+    Write-Log -Message "--- Disabling Background Apps ---" -OutputBox $OutputBox -Color 'Gold'
     Set-RegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 1 -OutputBox $OutputBox
     Write-Log -Message "Background Apps disabled." -OutputBox $OutputBox
+}
+
+function Invoke-AdobeDebloat {
+    param($OutputBox)
+    Write-Log -Message "--- Debloating Adobe ---" -OutputBox $OutputBox -Color 'Gold'
+    $adobeServices = @{"AGSService" = "Disabled"; "AGMService" = "Disabled"; "AdobeUpdateService" = "Manual"; "AdobeARMservice" = "Manual"; "CCXProcess" = "Manual"; "CoreSync" = "Manual"}
+    foreach ($name in $adobeServices.Keys) { Set-ServiceStatus -Name $name -StartupType $adobeServices[$name] -OutputBox $OutputBox }
+
+    Write-Log -Message "Attempting to rename Adobe Desktop Service..." -OutputBox $OutputBox -Color 'Cyan'
+    $path = "C:\Program Files (x86)\Common Files\Adobe\Adobe Desktop Common\ADS\Adobe Desktop Service.exe"
+    if (Test-Path $path) {
+        try {
+            Rename-Item -Path $path -NewName "Adobe Desktop Service.exe.old" -Force -ErrorAction Stop
+            Write-Log -Message "Successfully renamed Adobe Desktop Service." -OutputBox $OutputBox -Color 'LimeGreen'
+        } catch {
+            Write-Log -Message "ERROR: Failed to rename Adobe Desktop Service. Permissions issue or file in use." -OutputBox $OutputBox -Color 'Red'
+        }
+    } else {
+        Write-Log -Message "INFO: Adobe Desktop Service not found at default location." -OutputBox $OutputBox -Color 'Gray'
+    }
+    Write-Log -Message "Adobe Debloat complete." -OutputBox $OutputBox
+}
+
+function Invoke-DisableRecall {
+    param($OutputBox)
+    Write-Log -Message "--- Disabling Windows Recall Feature ---" -OutputBox $OutputBox -Color 'Gold'
+    try {
+        Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI" -Name "DisableAIDataAnalysis" -Value 1 -OutputBox $OutputBox
+        Write-Log -Message "Executing DISM to disable Recall feature. This may take a moment..." -OutputBox $OutputBox -Color 'Cyan'
+        $process = Start-Process "DISM.exe" -ArgumentList "/Online /Disable-Feature /FeatureName:Recall" -Wait -PassThru -NoNewWindow
+        if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) { # 3010 means success, restart required
+            Write-Log -Message "Successfully disabled Windows Recall feature. A restart may be required." -OutputBox $OutputBox -Color 'LimeGreen'
+        } else {
+            Write-Log -Message "ERROR: DISM failed to disable Recall. Exit code: $($process.ExitCode)" -OutputBox $OutputBox -Color 'Red'
+        }
+    } catch {
+        Write-Log -Message "ERROR: An exception occurred while disabling Recall. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red'
+    }
+}
+
+function Invoke-DisableStorageSense {
+    param($OutputBox)
+    Write-Log -Message "--- Disabling Storage Sense ---" -OutputBox $OutputBox -Color 'Gold'
+    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" -Name "01" -Value 0 -OutputBox $OutputBox
+    Write-Log -Message "Storage Sense disabled." -OutputBox $OutputBox
+}
+
+function Invoke-DisableWifiSense {
+    param($OutputBox)
+    Write-Log -Message "--- Disabling WiFi Sense ---" -OutputBox $OutputBox -Color 'Gold'
+    Set-RegValue -Path "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowWiFiHotSpotReporting" -Name "Value" -Value 0 -OutputBox $OutputBox
+    Set-RegValue -Path "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowAutoConnectToWiFiSenseHotspots" -Name "Value" -Value 0 -OutputBox $OutputBox
+    Write-Log -Message "WiFi Sense disabled." -OutputBox $OutputBox
 }
 
 #================================================================================================
@@ -242,8 +260,8 @@ function Invoke-DisableBackgroundApps {
 #================================================================================================
 
 $main_form = New-Object System.Windows.Forms.Form
-$main_form.Text = "Windows Optimization Tool"
-$main_form.Size = New-Object System.Drawing.Size(600, 740)
+$main_form.Text = "Windows Optimization Tool v1.6"
+$main_form.Size = New-Object System.Drawing.Size(600, 740) # Adjusted for single column
 $main_form.StartPosition = "CenterScreen"
 $main_form.FormBorderStyle = 'FixedSingle'
 $main_form.MaximizeBox = $false
@@ -254,29 +272,34 @@ $main_form.ForeColor = [System.Drawing.Color]::White
 $font = New-Object System.Drawing.Font("Segoe UI", 10)
 $titleFont = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
 
-# --- GroupBox for Checkboxes ---
+# --- GroupBox to contain the checkboxes ---
 $group_box = New-Object System.Windows.Forms.GroupBox
 $group_box.Location = New-Object System.Drawing.Point(20, 20)
-$group_box.Size = New-Object System.Drawing.Size(545, 350)
+$group_box.Size = New-Object System.Drawing.Size(545, 500) # Adjusted for single column
 $group_box.Text = "Select Tweaks to Apply"
 $group_box.Font = $titleFont
 $group_box.ForeColor = [System.Drawing.Color]::White
 $main_form.Controls.Add($group_box)
 
-# --- Create Checkboxes ---
+# --- Create Checkboxes and add them to the panel ---
 $checkboxes = @{}
 $tweak_categories = @(
     "Delete Temporary Files",
+    "Disable Hibernation",
+    "Optimize Services",
     "Disable Telemetry & Consumer Features",
     "Disable Activity History",
     "Disable Game DVR",
-    "Disable Hibernation",
-    "Optimize Services",
-    "Debloat Microsoft Edge",
+    "Disable Background Apps",
+    "Disable Storage Sense",
+    "Disable WiFi Sense",
     "Disable Teredo",
-    "Disable Background Apps"
+    "Disable Recall (Windows 11)",
+    "Debloat Microsoft Edge",
+    "Adobe Debloat"
 )
 
+# Logic to fill a single column vertically
 $y_pos = 30
 foreach ($category in $tweak_categories) {
     $checkbox = New-Object System.Windows.Forms.CheckBox
@@ -287,12 +310,12 @@ foreach ($category in $tweak_categories) {
     $checkbox.ForeColor = [System.Drawing.Color]::White
     $group_box.Controls.Add($checkbox)
     $checkboxes[$category] = $checkbox
-    $y_pos += 30
+    $y_pos += 35
 }
 
 # --- Create Buttons ---
 $btn_apply = New-Object System.Windows.Forms.Button
-$btn_apply.Location = New-Object System.Drawing.Point(385, 385)
+$btn_apply.Location = New-Object System.Drawing.Point(385, 535)
 $btn_apply.Size = New-Object System.Drawing.Size(180, 40)
 $btn_apply.Text = "Apply Selected Tweaks"
 $btn_apply.Font = $font
@@ -302,7 +325,7 @@ $btn_apply.FlatAppearance.BorderSize = 0
 $main_form.Controls.Add($btn_apply)
 
 $btn_select_all = New-Object System.Windows.Forms.Button
-$btn_select_all.Location = New-Object System.Drawing.Point(20, 385)
+$btn_select_all.Location = New-Object System.Drawing.Point(20, 535)
 $btn_select_all.Size = New-Object System.Drawing.Size(120, 40)
 $btn_select_all.Text = "Select All"
 $btn_select_all.Font = $font
@@ -312,7 +335,7 @@ $btn_select_all.FlatAppearance.BorderSize = 0
 $main_form.Controls.Add($btn_select_all)
 
 $btn_deselect_all = New-Object System.Windows.Forms.Button
-$btn_deselect_all.Location = New-Object System.Drawing.Point(150, 385)
+$btn_deselect_all.Location = New-Object System.Drawing.Point(150, 535)
 $btn_deselect_all.Size = New-Object System.Drawing.Size(120, 40)
 $btn_deselect_all.Text = "Deselect All"
 $btn_deselect_all.Font = $font
@@ -323,8 +346,8 @@ $main_form.Controls.Add($btn_deselect_all)
 
 # --- Output Log Textbox ---
 $output_box = New-Object System.Windows.Forms.RichTextBox
-$output_box.Location = New-Object System.Drawing.Point(20, 440)
-$output_box.Size = New-Object System.Drawing.Size(545, 240)
+$output_box.Location = New-Object System.Drawing.Point(20, 590)
+$output_box.Size = New-Object System.Drawing.Size(545, 100)
 $output_box.Font = New-Object System.Drawing.Font("Consolas", 9)
 $output_box.ReadOnly = $true
 $output_box.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
@@ -354,16 +377,20 @@ $btn_apply.Add_Click({
 
     Write-Log -Message "Starting optimizations..." -OutputBox $output_box
 
-    # Execute checked functions
+    # Execute checked functions in order
     if ($checkboxes["Delete Temporary Files"].Checked) { Invoke-DeleteTempFiles -OutputBox $output_box }
-    if ($checkboxes["Disable Telemetry & Consumer Features"].Checked) { Invoke-DisableTelemetry -OutputBox $output_box }
-    if ($checkboxes["Disable Activity History"].Checked) { Invoke-DisableActivityHistory -OutputBox $output_box }
-    if ($checkboxes["Disable Game DVR"].Checked) { Invoke-DisableGameDVR -OutputBox $output_box }
     if ($checkboxes["Disable Hibernation"].Checked) { Invoke-DisableHibernation -OutputBox $output_box }
     if ($checkboxes["Optimize Services"].Checked) { Invoke-OptimizeServices -OutputBox $output_box }
-    if ($checkboxes["Debloat Microsoft Edge"].Checked) { Invoke-DebloatEdge -OutputBox $output_box }
-    if ($checkboxes["Disable Teredo"].Checked) { Invoke-DisableTeredo -OutputBox $output_box }
+    if ($checkboxes["Disable Telemetry & Consumer Features"].Checked) { Invoke-DisableTelemetry -OutputBox $output_box }
+    if ($checkboxes["Disable Activity History"].Checked) { Invoke-DisableActivityHistory -OutputBox $output_box }
+    if ($checkboxes["Disable Game DVR"].Checked) { Invoke-DisableGameDVR -OutputBox $outputBox }
     if ($checkboxes["Disable Background Apps"].Checked) { Invoke-DisableBackgroundApps -OutputBox $output_box }
+    if ($checkboxes["Disable Storage Sense"].Checked) { Invoke-DisableStorageSense -OutputBox $output_box }
+    if ($checkboxes["Disable WiFi Sense"].Checked) { Invoke-DisableWifiSense -OutputBox $output_box }
+    if ($checkboxes["Disable Teredo"].Checked) { Invoke-DisableTeredo -OutputBox $output_box }
+    if ($checkboxes["Disable Recall (Windows 11)"].Checked) { Invoke-DisableRecall -OutputBox $output_box }
+    if ($checkboxes["Debloat Microsoft Edge"].Checked) { Invoke-DebloatEdge -OutputBox $output_box }
+    if ($checkboxes["Adobe Debloat"].Checked) { Invoke-AdobeDebloat -OutputBox $output_box }
     
     Write-Log -Message "--- ALL TASKS COMPLETE ---" -OutputBox $output_box -Color 'Gold'
 
