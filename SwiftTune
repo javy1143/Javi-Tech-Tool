@@ -1,15 +1,16 @@
 <#
 .SYNOPSIS
-    A PowerShell script with a Graphical User Interface (GUI) to apply various Windows optimization tweaks.
+    A PowerShell script with a Graphical User Interface (GUI) to apply various Windows optimization tweaks and launch external tools.
 
 .DESCRIPTION
     This script provides a user-friendly window with checkboxes for different optimization categories,
-    allowing a user to select and apply tweaks based on the commands from the provided text file.
-    It requires administrative privileges to modify system settings and will prompt for them if not detected.
+    allowing a user to select and apply tweaks. It also includes a button to download and run
+    O&O ShutUp10++ for advanced privacy settings.
+    It requires administrative privileges and will prompt for them if not detected.
 
 .NOTES
     Author: Gemini
-    Version: 1.6
+    Version: 1.7
     Instructions: Run this script as an Administrator.
 #>
 
@@ -254,13 +255,32 @@ function Invoke-DisableWifiSense {
     Write-Log -Message "WiFi Sense disabled." -OutputBox $OutputBox
 }
 
+function Invoke-OOSU10 {
+    param($OutputBox)
+    $url = "https://dl5.oo-software.com/files/ooshutup10/OOSU10.exe"
+    $dest = Join-Path $env:TEMP "OOSU10.exe"
+    
+    Write-Log -Message "--- Launching O&O ShutUp10++ ---" -OutputBox $OutputBox -Color 'Gold'
+    Write-Log -Message "Downloading from $url..." -OutputBox $OutputBox -Color 'Cyan'
+    
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+        Write-Log -Message "Download complete. Launching application..." -OutputBox $OutputBox -Color 'LimeGreen'
+        Start-Process -FilePath $dest
+    } catch {
+        Write-Log -Message "ERROR: Failed to download O&O ShutUp10++. Please check your internet connection." -OutputBox $OutputBox -Color 'Red'
+        Write-Log -Message "Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red'
+    }
+}
+
+
 #================================================================================================
 # 3. GUI CREATION
 # This section defines all the visual elements of the application window.
 #================================================================================================
 
 $main_form = New-Object System.Windows.Forms.Form
-$main_form.Text = "Windows Optimization Tool v1.6"
+$main_form.Text = "Windows Optimization Tool v1.7"
 $main_form.Size = New-Object System.Drawing.Size(600, 740) # Adjusted for single column
 $main_form.StartPosition = "CenterScreen"
 $main_form.FormBorderStyle = 'FixedSingle'
@@ -315,8 +335,8 @@ foreach ($category in $tweak_categories) {
 
 # --- Create Buttons ---
 $btn_apply = New-Object System.Windows.Forms.Button
-$btn_apply.Location = New-Object System.Drawing.Point(385, 535)
-$btn_apply.Size = New-Object System.Drawing.Size(180, 40)
+$btn_apply.Location = New-Object System.Drawing.Point(405, 535) # Adjusted position
+$btn_apply.Size = New-Object System.Drawing.Size(160, 40) # Adjusted size
 $btn_apply.Text = "Apply Selected Tweaks"
 $btn_apply.Font = $font
 $btn_apply.BackColor = [System.Drawing.Color]::FromArgb(0, 122, 204)
@@ -326,7 +346,7 @@ $main_form.Controls.Add($btn_apply)
 
 $btn_select_all = New-Object System.Windows.Forms.Button
 $btn_select_all.Location = New-Object System.Drawing.Point(20, 535)
-$btn_select_all.Size = New-Object System.Drawing.Size(120, 40)
+$btn_select_all.Size = New-Object System.Drawing.Size(90, 40) # Adjusted size
 $btn_select_all.Text = "Select All"
 $btn_select_all.Font = $font
 $btn_select_all.BackColor = [System.Drawing.Color]::FromArgb(63, 63, 70)
@@ -335,14 +355,25 @@ $btn_select_all.FlatAppearance.BorderSize = 0
 $main_form.Controls.Add($btn_select_all)
 
 $btn_deselect_all = New-Object System.Windows.Forms.Button
-$btn_deselect_all.Location = New-Object System.Drawing.Point(150, 535)
-$btn_deselect_all.Size = New-Object System.Drawing.Size(120, 40)
+$btn_deselect_all.Location = New-Object System.Drawing.Point(120, 535) # Adjusted position
+$btn_deselect_all.Size = New-Object System.Drawing.Size(90, 40) # Adjusted size
 $btn_deselect_all.Text = "Deselect All"
 $btn_deselect_all.Font = $font
 $btn_deselect_all.BackColor = [System.Drawing.Color]::FromArgb(63, 63, 70)
 $btn_deselect_all.FlatStyle = 'Flat'
 $btn_deselect_all.FlatAppearance.BorderSize = 0
 $main_form.Controls.Add($btn_deselect_all)
+
+# --- NEW BUTTON for O&O ShutUp10++ ---
+$btn_oosu10 = New-Object System.Windows.Forms.Button
+$btn_oosu10.Location = New-Object System.Drawing.Point(220, 535) # Positioned between other buttons
+$btn_oosu10.Size = New-Object System.Drawing.Size(175, 40)
+$btn_oosu10.Text = "Launch O&O ShutUp10++"
+$btn_oosu10.Font = $font
+$btn_oosu10.BackColor = [System.Drawing.Color]::FromArgb(107, 33, 107) # Distinct color
+$btn_oosu10.FlatStyle = 'Flat'
+$btn_oosu10.FlatAppearance.BorderSize = 0
+$main_form.Controls.Add($btn_oosu10)
 
 # --- Output Log Textbox ---
 $output_box = New-Object System.Windows.Forms.RichTextBox
@@ -367,6 +398,10 @@ $btn_select_all.Add_Click({
 
 $btn_deselect_all.Add_Click({
     $checkboxes.Values | ForEach-Object { $_.Checked = $false }
+})
+
+$btn_oosu10.Add_Click({
+    Invoke-OOSU10 -OutputBox $output_box
 })
 
 $btn_apply.Add_Click({
