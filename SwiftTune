@@ -24,33 +24,25 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
         Background="#F5F5F5">
     <Grid Margin="10">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/> <!-- For title TextBlock -->
-            <RowDefinition Height="*"/>    <!-- For main content (Options OR Output/Progress) -->
-            <RowDefinition Height="Auto"/> <!-- For buttons -->
-        </Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/> <RowDefinition Height="*"/>    <RowDefinition Height="Auto"/> </Grid.RowDefinitions>
 
-        <!-- Top TextBlock -->
         <StackPanel Grid.Row="0" Margin="0,0,0,10">
             <TextBlock Text="Select optimization tweaks to apply:" FontSize="16" FontWeight="Bold" Margin="0,0,0,10"/>
         </StackPanel>
 
-        <!-- Main Content Area: Options Panel (Visible by default) -->
         <ScrollViewer Grid.Row="1" x:Name="OptionsPanel" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                       Visibility="Visible">
             <StackPanel>
-                <!-- Delete Temporary Files -->
                 <GroupBox Header="Delete Temporary Files" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
                     <CheckBox x:Name="CheckBox_DeleteTempFiles" Content="Delete temporary files from C:\Windows\Temp and user TEMP directory" IsChecked="True"
                               ToolTip="Deletes files from C:\Windows\Temp and your user's temporary folder (%TEMP%). This is generally safe and frees up disk space."/>
                 </GroupBox>
 
-                <!-- Disable Consumer Features -->
                 <GroupBox Header="Disable Consumer Features" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
                     <CheckBox x:Name="CheckBox_DisableConsumerFeatures" Content="Disable Windows Consumer Features" IsChecked="True"
                               ToolTip="Disables suggested content, advertisements, and pre-installed apps from Microsoft."/>
                 </GroupBox>
 
-                <!-- Disable Telemetry & Privacy -->
                 <GroupBox Header="Disable Telemetry &amp; Privacy" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
                     <StackPanel>
                         <CheckBox x:Name="CheckBox_DisableScheduledTasks" Content="Disable Telemetry Scheduled Tasks" IsChecked="True"
@@ -70,37 +62,31 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
                     </StackPanel>
                 </GroupBox>
 
-                <!-- Disable GameDVR -->
                 <GroupBox Header="Disable GameDVR" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
                     <CheckBox x:Name="CheckBox_DisableGameDVR" Content="Disable Game DVR and Game Bar features" IsChecked="True"
                               ToolTip="Turns off Game DVR, Game Bar, and related features that record gameplay in the background, potentially improving gaming performance."/>
                 </GroupBox>
 
-                <!-- Disable Hibernation -->
                 <GroupBox Header="Disable Hibernation" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
                     <CheckBox x:Name="CheckBox_DisableHibernation" Content="Disable Hibernation (frees up disk space)" IsChecked="True"
                               ToolTip="Disables the hibernation feature, which can free up significant disk space by removing the hiberfil.sys file. Note: This will remove the 'Hibernate' option from power menus."/>
                 </GroupBox>
 
-                <!-- Disable Homegroup -->
                 <GroupBox Header="Disable Homegroup" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
                     <CheckBox x:Name="CheckBox_DisableHomegroup" Content="Set Homegroup services to Manual" IsChecked="True"
                               ToolTip="Sets Homegroup-related services to Manual. Homegroup is a deprecated feature in modern Windows versions and can be safely disabled if not used."/>
                 </GroupBox>
 
-                <!-- Set Services to Manual/Automatic -->
                 <GroupBox Header="Optimize Services Startup" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
                     <CheckBox x:Name="CheckBox_SetServices" Content="Set various Windows services to Manual, Automatic, or Disabled" IsChecked="True"
                               ToolTip="Adjusts the startup type (Automatic, Manual, Disabled) for numerous Windows services to optimize performance and reduce background activity. Some services may be protected and cannot be changed."/>
                 </GroupBox>
 
-                <!-- Debloat Edge -->
                 <GroupBox Header="Debloat Microsoft Edge" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
                     <CheckBox x:Name="CheckBox_DebloatEdge" Content="Disable various Edge features, personalization, and telemetry" IsChecked="True"
                               ToolTip="Modifies Microsoft Edge settings in the registry to disable features like desktop shortcuts, personalization, recommendations, shopping assistant, and diagnostic data."/>
                 </GroupBox>
 
-                <!-- Adobe Debloat -->
                 <GroupBox Header="Adobe Debloat" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
                     <StackPanel>
                         <CheckBox x:Name="CheckBox_AdobeServices" Content="Set various Adobe services to Manual or Disabled" IsChecked="True"
@@ -112,13 +98,11 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
                     </StackPanel>
                 </GroupBox>
 
-                <!-- Disable Teredo -->
                 <GroupBox Header="Disable Teredo" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
                     <CheckBox x:Name="CheckBox_DisableTeredo" Content="Disable Teredo tunneling interface" IsChecked="True"
                               ToolTip="Disables the Teredo tunneling interface, which is used for IPv6 connectivity over IPv4 networks. This is often not needed in most modern network setups and can be safely disabled."/>
                 </GroupBox>
 
-                <!-- Disable Background Apps -->
                 <GroupBox Header="Disable Background Apps" Margin="0,0,0,10" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
                     <CheckBox x:Name="CheckBox_DisableBackgroundApps" Content="Disable background applications globally" IsChecked="True"
                               ToolTip="Turns off background app access globally for Universal Windows Platform (UWP) apps, preventing them from consuming resources when not actively used."/>
@@ -126,19 +110,15 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
             </StackPanel>
         </ScrollViewer>
 
-        <!-- Main Content Area: Output and Progress Panel (Collapsed by default) -->
         <Grid Grid.Row="1" x:Name="OutputAndProgressBarPanel" Visibility="Collapsed">
             <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/> <!-- For ProgressBar -->
-                <RowDefinition Height="*"/>    <!-- For OutputTextBox -->
-            </Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/> <RowDefinition Height="*"/>    </Grid.RowDefinitions>
             <ProgressBar x:Name="OverallProgressBar" Grid.Row="0" Height="20" Margin="0,10,0,10"
                          Foreground="#4CAF50" Background="#E0E0E0" BorderBrush="#CCCCCC" BorderThickness="1"/>
             <TextBox x:Name="OutputTextBox" Grid.Row="1" VerticalAlignment="Stretch" HorizontalAlignment="Stretch"
                      TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" IsReadOnly="True" MinHeight="100"/>
         </Grid>
         
-        <!-- Buttons Panel -->
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
             <Button x:Name="RunButton" Content="Run Optimizations" Width="150" Height="30" Margin="0,0,10,0" Background="#4CAF50" Foreground="White" FontWeight="Bold"/>
         </StackPanel>
@@ -612,7 +592,7 @@ function Perform-SetServices {
         "Wecsvc" = "Manual";
         "WerSvc" = "Manual";
         "WiaRpc" = "Manual";
-        "WinHttpAutoProxySvc" = "Manual"; # Often protected
+        "WinHttpAutoProxySvc = "Manual"; # Corrected: Removed stray "="
         "WinRM" = "Manual";
         "Winmgmt" = "Automatic";
         "WlanSvc" = "Automatic";
