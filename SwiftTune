@@ -1,19 +1,3 @@
-<#
-.SYNOPSIS
-    A PowerShell script with a Graphical User Interface (GUI) to apply various Windows optimization tweaks and launch external tools.
-
-.DESCRIPTION
-    This script provides a user-friendly window with checkboxes for different optimization categories,
-    allowing a user to select and apply tweaks. It also includes a button to download and run
-    O&O ShutUp10++ for advanced privacy settings.
-    It requires administrative privileges and will prompt for them if not detected.
-
-.NOTES
-    Author: Gemini
-    Version: 1.7
-    Instructions: Run this script as an Administrator.
-#>
-
 #================================================================================================
 # 1. ADMIN & ASSEMBLY SETUP
 #================================================================================================
@@ -44,12 +28,13 @@ catch {
 # These functions encapsulate the logic for each optimization category.
 #================================================================================================
 
-# --- Helper to log messages to the GUI's output box ---
+# --- Helper to log messages to the GUI's output box and status bar ---
 function Write-Log {
     param(
         [string]$Message,
         [System.Windows.Forms.RichTextBox]$OutputBox,
-        [System.Drawing.Color]$Color = [System.Drawing.Color]::White
+        [System.Drawing.Color]$Color = [System.Drawing.Color]::White,
+        [System.Windows.Forms.ToolStripStatusLabel]$StatusLabel = $null # New parameter for status bar
     )
     if ($OutputBox) {
         $OutputBox.SelectionStart = $OutputBox.TextLength
@@ -61,6 +46,12 @@ function Write-Log {
     }
     # Also write to the console host for debugging.
     Write-Host "$(Get-Date -f 'HH:mm:ss') - $Message"
+
+    # Update the status bar label if provided
+    if ($StatusLabel) {
+        $StatusLabel.Text = "$Message"
+        [System.Windows.Forms.Application]::DoEvents() # Ensure status bar updates immediately
+    }
 }
 
 # --- Helper for setting registry values safely ---
@@ -70,18 +61,19 @@ function Set-RegValue {
         [string]$Name,
         $Value,
         [string]$Type = "DWord",
-        [System.Windows.Forms.RichTextBox]$OutputBox
+        [System.Windows.Forms.RichTextBox]$OutputBox,
+        [System.Windows.Forms.ToolStripStatusLabel]$StatusLabel # Pass through status label
     )
     try {
         if (-not (Test-Path $Path)) {
-            Write-Log -Message "Creating registry path: $Path" -OutputBox $OutputBox -Color 'Yellow'
+            Write-Log -Message "Creating registry path: $Path" -OutputBox $OutputBox -Color 'Yellow' -StatusLabel $StatusLabel
             New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
         }
         Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force -ErrorAction Stop
-        Write-Log -Message "Set [$Name] in [$Path]" -OutputBox $OutputBox -Color 'LimeGreen'
+        Write-Log -Message "Set [$Name] in [$Path]" -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
     }
     catch {
-        Write-Log -Message "ERROR: Failed to set registry value $Name at $Path. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red'
+        Write-Log -Message "ERROR: Failed to set registry value $Name at $Path. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
     }
 }
 
@@ -90,187 +82,241 @@ function Set-ServiceStatus {
     param(
         [string]$Name,
         [string]$StartupType,
-        [System.Windows.Forms.RichTextBox]$OutputBox
+        [System.Windows.Forms.RichTextBox]$OutputBox,
+        [System.Windows.Forms.ToolStripStatusLabel]$StatusLabel # Pass through status label
     )
     try {
         $svc = Get-Service -Name $name -ErrorAction Stop
         if ($svc) {
-            Write-Log -Message "Setting service '$($svc.Name)' to $startupType" -OutputBox $OutputBox -Color 'Cyan'
+            Write-Log -Message "Setting service '$($svc.Name)' to $startupType" -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
             Set-Service -Name $svc.Name -StartupType $startupType -ErrorAction Stop
         }
     }
     catch {
-        Write-Log -Message "INFO: Service '$name' not found or couldn't be changed." -OutputBox $OutputBox -Color 'Gray'
+        Write-Log -Message "INFO: Service '$name' not found or couldn't be changed." -OutputBox $OutputBox -Color 'Gray' -StatusLabel $StatusLabel
     }
 }
 
 # --- Tweak Functions ---
-
+# Each Invoke- function now accepts $StatusLabel and passes it to Write-Log
 function Invoke-DeleteTempFiles {
-    param($OutputBox)
-    Write-Log -Message "--- Deleting Temporary Files ---" -OutputBox $OutputBox -Color 'Gold'
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Deleting Temporary Files ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
     $paths = "C:\Windows\Temp", $env:TEMP
     foreach ($p in $paths) {
-        Write-Log -Message "Cleaning folder: $p" -OutputBox $OutputBox -Color 'Cyan'
+        Write-Log -Message "Cleaning folder: $p" -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
         Get-ChildItem -Path $p -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
     }
-    Write-Log -Message "Temporary file cleanup complete." -OutputBox $OutputBox
+    Write-Log -Message "Temporary file cleanup complete." -OutputBox $OutputBox -StatusLabel $StatusLabel
 }
 
 function Invoke-DisableTelemetry {
-    param($OutputBox)
-    Write-Log -Message "--- Disabling Telemetry & Consumer Features ---" -OutputBox $OutputBox -Color 'Gold'
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Disabling Telemetry & Consumer Features ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
     # Disable Scheduled Tasks
-    $tasks = "Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser", "Microsoft\Windows\Application Experience\ProgramDataUpdater", "Microsoft\Windows\Autochk\Proxy", "Microsoft\Windows\Customer Experience Improvement Program\Consolidator", "Microsoft\Windows\Customer Experience Improvement Program\UsbCeip", "Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector", "Microsoft\Windows\Feedback\Siuf\DmClient", "Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload", "Microsoft\Windows\Windows Error Reporting\QueueReporting", "Microsoft\Windows\Application Experience\MareBackup", "Microsoft\Windows\Application Experience\StartupAppTask", "Microsoft\Windows\Application Experience\PcaPatchDbTask", "Microsoft\Windows\Maps\MapsUpdateTask"
+    $tasks = "Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser", "Microsoft\Windows\Application Experience\ProgramDataUpdater", "Microsoft\Windows\Autochk\Proxy", "Microsoft\Windows\Customer Experience Improvement Program\Consolidator", "Microsoft\Windows\Customer Experience Improvement Program\UsbCeip", "Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector", "Microsoft\Windows\Feedback\Siuf\DmClient", "Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload", "Microsoft\Windows\Windows Error Reporting\QueueReporting", "Microsoft\Windows\Application Experience\MareBackup", "Microsoft\Windows\Application Experience\StartupAppTask", "Microsoft\Windows\Application Experience\PcaPatchDbTask", "Microsoft\Windows\WindowsUpdate\Automatic App Update", "Microsoft\Windows\Maps\MapsUpdateTask" # Added Automatic App Update
     foreach ($task in $tasks) {
-        Write-Log -Message "Disabling scheduled task: $task" -OutputBox $OutputBox -Color 'Cyan'
-        Get-ScheduledTask -TaskPath "\$task" -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue
+        Write-Log -Message "Disabling scheduled task: $task" -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
+        # Use try/catch for scheduled tasks as some might not exist on all systems
+        try {
+            Get-ScheduledTask -TaskPath "\$task" -ErrorAction Stop | Disable-ScheduledTask -ErrorAction Stop
+            Write-Log -Message "Task '$task' disabled." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
+        }
+        catch {
+            Write-Log -Message "INFO: Scheduled task '$task' not found or couldn't be disabled. $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Gray' -StatusLabel $StatusLabel
+        }
     }
 
     # Registry Tweaks
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsConsumerFeatures" -Value 1 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection" -Name "AllowTelemetry" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "ContentDeliveryAllowed" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "OemPreInstalledAppsEnabled" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowTaskViewButton" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "SystemResponsiveness" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 0xFFFFFFFF -Type DWord -OutputBox $OutputBox
-    Set-RegValue -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value 1 -Type String -OutputBox $OutputBox
-    Set-RegValue -Path "HKCU:\Control Panel\Desktop" -Name "AutoEndTasks" -Value 1 -Type String -OutputBox $OutputBox
-    Write-Log -Message "Telemetry and Consumer Features disabled." -OutputBox $OutputBox
+    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsConsumerFeatures" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection" -Name "AllowTelemetry" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "ContentDeliveryAllowed" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "OemPreInstalledAppsEnabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowTaskViewButton" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "SystemResponsiveness" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 0xFFFFFFFF -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value 1 -Type String -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKCU:\Control Panel\Desktop" -Name "AutoEndTasks" -Value 1 -Type String -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Write-Log -Message "Telemetry and Consumer Features disabled." -OutputBox $OutputBox -StatusLabel $StatusLabel
 }
 
 function Invoke-DisableActivityHistory {
-    param($OutputBox)
-    Write-Log -Message "--- Disabling Activity History ---" -OutputBox $OutputBox -Color 'Gold'
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableActivityFeed" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "PublishUserActivities" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "UploadUserActivities" -Value 0 -OutputBox $OutputBox
-    Write-Log -Message "Activity History disabled." -OutputBox $OutputBox
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Disabling Activity History ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableActivityFeed" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "PublishUserActivities" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "UploadUserActivities" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Write-Log -Message "Activity History disabled." -OutputBox $OutputBox -StatusLabel $StatusLabel
 }
 
 function Invoke-DisableGameDVR {
-    param($OutputBox)
-    Write-Log -Message "--- Disabling Game DVR ---" -OutputBox $OutputBox -Color 'Gold'
-    Set-RegValue -Path "HKCU:\System\GameConfigStore" -Name "GameDVR_Enabled" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" -Name "AllowGameDVR" -Value 0 -OutputBox $OutputBox
-    Write-Log -Message "Game DVR disabled." -OutputBox $OutputBox
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Disabling Game DVR ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKCU:\System\GameConfigStore" -Name "GameDVR_Enabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" -Name "AllowGameDVR" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Write-Log -Message "Game DVR disabled." -OutputBox $OutputBox -StatusLabel $StatusLabel
 }
 
 function Invoke-DisableHibernation {
-    param($OutputBox)
-    Write-Log -Message "--- Disabling Hibernation ---" -OutputBox $OutputBox -Color 'Gold'
-    powercfg -h off
-    Set-RegValue -Path "HKLM:\System\CurrentControlSet\Control\Session Manager\Power" -Name "HibernateEnabled" -Value 0 -OutputBox $OutputBox
-    Write-Log -Message "Hibernation disabled." -OutputBox $OutputBox
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Disabling Hibernation ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
+    try {
+        powercfg -h off | Out-Null
+        Set-RegValue -Path "HKLM:\System\CurrentControlSet\Control\Session Manager\Power" -Name "HibernateEnabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Write-Log -Message "Hibernation disabled." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
+    } catch {
+        Write-Log -Message "ERROR: Failed to disable hibernation. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
+    }
 }
 
 function Invoke-OptimizeServices {
-    param($OutputBox)
-    Write-Log -Message "--- Optimizing Services ---" -OutputBox $OutputBox -Color 'Gold'
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Optimizing Services ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
     $services = @{"AJRouter" = "Disabled"; "ALG" = "Manual"; "AppVClient" = "Disabled"; "AppXSvc" = "Manual"; "AxInstSV" = "Manual"; "BcastDVRUserService_*" = "Manual"; "BITS" = "AutomaticDelayedStart"; "Browser" = "Manual"; "diagsvc" = "Manual"; "DiagTrack" = "Disabled"; "dmwappushservice" = "Manual"; "Fax" = "Manual"; "HomeGroupListener" = "Manual"; "HomeGroupProvider" = "Manual"; "RemoteRegistry" = "Disabled"; "ssh-agent" = "Disabled"; "TapiSrv" = "Manual"; "tzautoupdate" = "Disabled"; "UevAgentService" = "Disabled"; "wuauserv" = "Manual"}
-    foreach ($name in $services.Keys) { Set-ServiceStatus -Name $name -StartupType $services[$name] -OutputBox $OutputBox }
-    Write-Log -Message "Service optimization complete." -OutputBox $OutputBox
+    foreach ($name in $services.Keys) { Set-ServiceStatus -Name $name -StartupType $services[$name] -OutputBox $OutputBox -StatusLabel $StatusLabel }
+    Write-Log -Message "Service optimization complete." -OutputBox $OutputBox -StatusLabel $StatusLabel
 }
 
 function Invoke-DebloatEdge {
-    param($OutputBox)
-    Write-Log -Message "--- Debloating Microsoft Edge ---" -OutputBox $OutputBox -Color 'Gold'
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "PersonalizationReportingEnabled" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "ShowRecommendationsEnabled" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "HideFirstRunExperience" -Value 1 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "EdgeShoppingAssistantEnabled" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "WebWidgetAllowed" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "CryptoWalletEnabled" -Value 0 -OutputBox $OutputBox
-    Write-Log -Message "Microsoft Edge debloating complete." -OutputBox $OutputBox
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Debloating Microsoft Edge ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "PersonalizationReportingEnabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "ShowRecommendationsEnabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "HideFirstRunExperience" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "EdgeShoppingAssistantEnabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "WebWidgetAllowed" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "CryptoWalletEnabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Write-Log -Message "Microsoft Edge debloating complete." -OutputBox $OutputBox -StatusLabel $StatusLabel
 }
 
 function Invoke-DisableTeredo {
-    param($OutputBox)
-    Write-Log -Message "--- Disabling Teredo ---" -OutputBox $OutputBox -Color 'Gold'
-    netsh interface teredo set state disabled | Out-Null
-    Set-RegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" -Name "DisabledComponents" -Value 0x8e -OutputBox $OutputBox
-    Write-Log -Message "Teredo disabled." -OutputBox $OutputBox
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Disabling Teredo ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
+    try {
+        netsh interface teredo set state disabled | Out-Null
+        Set-RegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" -Name "DisabledComponents" -Value 0x8e -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Write-Log -Message "Teredo disabled." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
+    } catch {
+        Write-Log -Message "ERROR: Failed to disable Teredo. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
+    }
 }
 
 function Invoke-DisableBackgroundApps {
-    param($OutputBox)
-    Write-Log -Message "--- Disabling Background Apps ---" -OutputBox $OutputBox -Color 'Gold'
-    Set-RegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 1 -OutputBox $OutputBox
-    Write-Log -Message "Background Apps disabled." -OutputBox $OutputBox
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Disabling Background Apps ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Write-Log -Message "Background Apps disabled." -OutputBox $OutputBox -StatusLabel $StatusLabel
 }
 
 function Invoke-AdobeDebloat {
-    param($OutputBox)
-    Write-Log -Message "--- Debloating Adobe ---" -OutputBox $OutputBox -Color 'Gold'
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Debloating Adobe ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
     $adobeServices = @{"AGSService" = "Disabled"; "AGMService" = "Disabled"; "AdobeUpdateService" = "Manual"; "AdobeARMservice" = "Manual"; "CCXProcess" = "Manual"; "CoreSync" = "Manual"}
-    foreach ($name in $adobeServices.Keys) { Set-ServiceStatus -Name $name -StartupType $adobeServices[$name] -OutputBox $OutputBox }
+    foreach ($name in $adobeServices.Keys) { Set-ServiceStatus -Name $name -StartupType $adobeServices[$name] -OutputBox $OutputBox -StatusLabel $StatusLabel }
 
-    Write-Log -Message "Attempting to rename Adobe Desktop Service..." -OutputBox $OutputBox -Color 'Cyan'
+    Write-Log -Message "Attempting to rename Adobe Desktop Service..." -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
     $path = "C:\Program Files (x86)\Common Files\Adobe\Adobe Desktop Common\ADS\Adobe Desktop Service.exe"
     if (Test-Path $path) {
         try {
             Rename-Item -Path $path -NewName "Adobe Desktop Service.exe.old" -Force -ErrorAction Stop
-            Write-Log -Message "Successfully renamed Adobe Desktop Service." -OutputBox $OutputBox -Color 'LimeGreen'
+            Write-Log -Message "Successfully renamed Adobe Desktop Service." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
         } catch {
-            Write-Log -Message "ERROR: Failed to rename Adobe Desktop Service. Permissions issue or file in use." -OutputBox $OutputBox -Color 'Red'
+            Write-Log -Message "ERROR: Failed to rename Adobe Desktop Service. Permissions issue or file in use." -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
         }
     } else {
-        Write-Log -Message "INFO: Adobe Desktop Service not found at default location." -OutputBox $OutputBox -Color 'Gray'
+        Write-Log -Message "INFO: Adobe Desktop Service not found at default location." -OutputBox $OutputBox -Color 'Gray' -StatusLabel $StatusLabel
     }
-    Write-Log -Message "Adobe Debloat complete." -OutputBox $OutputBox
+    Write-Log -Message "Adobe Debloat complete." -OutputBox $OutputBox -StatusLabel $StatusLabel
 }
 
 function Invoke-DisableRecall {
-    param($OutputBox)
-    Write-Log -Message "--- Disabling Windows Recall Feature ---" -OutputBox $OutputBox -Color 'Gold'
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Disabling Windows Recall Feature ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
     try {
-        Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI" -Name "DisableAIDataAnalysis" -Value 1 -OutputBox $OutputBox
-        Write-Log -Message "Executing DISM to disable Recall feature. This may take a moment..." -OutputBox $OutputBox -Color 'Cyan'
+        Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI" -Name "DisableAIDataAnalysis" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Write-Log -Message "Executing DISM to disable Recall feature. This may take a moment..." -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
         $process = Start-Process "DISM.exe" -ArgumentList "/Online /Disable-Feature /FeatureName:Recall" -Wait -PassThru -NoNewWindow
         if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) { # 3010 means success, restart required
-            Write-Log -Message "Successfully disabled Windows Recall feature. A restart may be required." -OutputBox $OutputBox -Color 'LimeGreen'
+            Write-Log -Message "Successfully disabled Windows Recall feature. A restart may be required." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
         } else {
-            Write-Log -Message "ERROR: DISM failed to disable Recall. Exit code: $($process.ExitCode)" -OutputBox $OutputBox -Color 'Red'
+            Write-Log -Message "ERROR: DISM failed to disable Recall. Exit code: $($process.ExitCode)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
         }
     } catch {
-        Write-Log -Message "ERROR: An exception occurred while disabling Recall. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red'
+        Write-Log -Message "ERROR: An exception occurred while disabling Recall. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
     }
 }
 
 function Invoke-DisableStorageSense {
-    param($OutputBox)
-    Write-Log -Message "--- Disabling Storage Sense ---" -OutputBox $OutputBox -Color 'Gold'
-    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" -Name "01" -Value 0 -OutputBox $OutputBox
-    Write-Log -Message "Storage Sense disabled." -OutputBox $OutputBox
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Disabling Storage Sense ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" -Name "01" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Write-Log -Message "Storage Sense disabled." -OutputBox $OutputBox -StatusLabel $StatusLabel
 }
 
 function Invoke-DisableWifiSense {
-    param($OutputBox)
-    Write-Log -Message "--- Disabling WiFi Sense ---" -OutputBox $OutputBox -Color 'Gold'
-    Set-RegValue -Path "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowWiFiHotSpotReporting" -Name "Value" -Value 0 -OutputBox $OutputBox
-    Set-RegValue -Path "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowAutoConnectToWiFiSenseHotspots" -Name "Value" -Value 0 -OutputBox $OutputBox
-    Write-Log -Message "WiFi Sense disabled." -OutputBox $OutputBox
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Disabling WiFi Sense ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowWiFiHotSpotReporting" -Name "Value" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Set-RegValue -Path "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowAutoConnectToWiFiSenseHotspots" -Name "Value" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
+    Write-Log -Message "WiFi Sense disabled." -OutputBox $OutputBox -StatusLabel $StatusLabel
 }
 
 function Invoke-OOSU10 {
-    param($OutputBox)
+    param($OutputBox, $StatusLabel)
     $url = "https://dl5.oo-software.com/files/ooshutup10/OOSU10.exe"
     $dest = Join-Path $env:TEMP "OOSU10.exe"
     
-    Write-Log -Message "--- Launching O&O ShutUp10++ ---" -OutputBox $OutputBox -Color 'Gold'
-    Write-Log -Message "Downloading from $url..." -OutputBox $OutputBox -Color 'Cyan'
+    Write-Log -Message "--- Launching O&O ShutUp10++ ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
+    Write-Log -Message "Downloading from $url..." -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
     
     try {
         Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
-        Write-Log -Message "Download complete. Launching application..." -OutputBox $OutputBox -Color 'LimeGreen'
+        Write-Log -Message "Download complete. Launching application..." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
         Start-Process -FilePath $dest
     } catch {
-        Write-Log -Message "ERROR: Failed to download O&O ShutUp10++. Please check your internet connection." -OutputBox $OutputBox -Color 'Red'
-        Write-Log -Message "Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red'
+        Write-Log -Message "ERROR: Failed to download O&O ShutUp10++. Please check your internet connection." -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
+        Write-Log -Message "Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
     }
+}
+
+# --- NEW Tweak Function: Network Optimizations ---
+function Invoke-NetworkOptimizations {
+    param($OutputBox, $StatusLabel)
+    Write-Log -Message "--- Applying Network Optimizations ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
+
+    # Disable Nagle's Algorithm (can reduce latency for some applications, especially games)
+    # This affects TCP connections and can sometimes cause issues with older applications.
+    # It's typically applied per network adapter or globally.
+    # For simplicity, we'll apply it to the default TCP parameters.
+    $tcpip_params_path = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+    $interfaces_path = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+
+    Write-Log -Message "Disabling Nagle's Algorithm (TcpNoDelay)..." -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
+    Set-RegValue -Path $tcpip_params_path -Name "TcpNoDelay" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
+
+    # Apply TcpNoDelay to all network interfaces (more robust)
+    try {
+        Get-ChildItem -Path $interfaces_path | ForEach-Object {
+            $interfacePath = $_.PSPath
+            Write-Log -Message "Setting TcpNoDelay for interface: $($_.Name)" -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
+            Set-RegValue -Path $interfacePath -Name "TcpNoDelay" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
+        }
+    } catch {
+        Write-Log -Message "WARNING: Could not apply TcpNoDelay to all interfaces. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Orange' -StatusLabel $StatusLabel
+    }
+
+    # Flush DNS Resolver Cache
+    Write-Log -Message "Flushing DNS Resolver Cache..." -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
+    try {
+        ipconfig /flushdns | Out-Null
+        Write-Log -Message "DNS Resolver Cache flushed." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
+    } catch {
+        Write-Log -Message "ERROR: Failed to flush DNS cache. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
+    }
+
+    Write-Log -Message "Network optimizations complete." -OutputBox $OutputBox -StatusLabel $StatusLabel
 }
 
 
@@ -292,48 +338,143 @@ $main_form.ForeColor = [System.Drawing.Color]::White
 $font = New-Object System.Drawing.Font("Segoe UI", 10)
 $titleFont = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
 
-# --- GroupBox to contain the checkboxes ---
-$group_box = New-Object System.Windows.Forms.GroupBox
-$group_box.Location = New-Object System.Drawing.Point(20, 20)
-$group_box.Size = New-Object System.Drawing.Size(545, 500) # Adjusted for single column
-$group_box.Text = "Select Tweaks to Apply"
-$group_box.Font = $titleFont
-$group_box.ForeColor = [System.Drawing.Color]::White
-$main_form.Controls.Add($group_box)
+# --- Create TabControl ---
+$tab_control = New-Object System.Windows.Forms.TabControl
+$tab_control.Location = New-Object System.Drawing.Point(20, 20)
+$tab_control.Size = New-Object System.Drawing.Size(545, 490) # Adjusted size for tabs
+$tab_control.Font = $font
+$tab_control.ForeColor = [System.Drawing.Color]::White
+$tab_control.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30) # Darker background for tabs
+$main_form.Controls.Add($tab_control)
 
-# --- Create Checkboxes and add them to the panel ---
-$checkboxes = @{}
-$tweak_categories = @(
-    "Delete Temporary Files",
-    "Disable Hibernation",
-    "Optimize Services",
+# --- Define Tweak Categories for Tabs ---
+$tweak_categories_privacy = @(
     "Disable Telemetry & Consumer Features",
     "Disable Activity History",
     "Disable Game DVR",
-    "Disable Background Apps",
     "Disable Storage Sense",
     "Disable WiFi Sense",
+    "Disable Recall (Windows 11)"
+)
+
+$tweak_categories_performance = @(
+    "Delete Temporary Files",
+    "Disable Hibernation",
+    "Optimize Services",
     "Disable Teredo",
-    "Disable Recall (Windows 11)",
+    "Disable Background Apps",
+    "Network Optimizations" # NEW: Added Network Optimizations
+)
+
+$tweak_categories_debloat = @(
     "Debloat Microsoft Edge",
     "Adobe Debloat"
 )
 
-# Logic to fill a single column vertically
-$y_pos = 30
-foreach ($category in $tweak_categories) {
+# --- Create TabPages and add checkboxes ---
+$checkboxes = @{} # This will store all checkboxes across all tabs
+
+# Privacy Tab
+$tab_privacy = New-Object System.Windows.Forms.TabPage "Privacy"
+$tab_privacy.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
+$tab_control.Controls.Add($tab_privacy)
+$y_pos_privacy = 20
+foreach ($category in $tweak_categories_privacy) {
     $checkbox = New-Object System.Windows.Forms.CheckBox
-    $checkbox.Location = New-Object System.Drawing.Point(20, $y_pos)
+    $checkbox.Location = New-Object System.Drawing.Point(20, $y_pos_privacy)
     $checkbox.Size = New-Object System.Drawing.Size(500, 30)
     $checkbox.Text = $category
     $checkbox.Font = $font
     $checkbox.ForeColor = [System.Drawing.Color]::White
-    $group_box.Controls.Add($checkbox)
+    $tab_privacy.Controls.Add($checkbox)
     $checkboxes[$category] = $checkbox
-    $y_pos += 35
+    $y_pos_privacy += 35
 }
 
-# --- Create Buttons ---
+# Performance Tab
+$tab_performance = New-Object System.Windows.Forms.TabPage "Performance"
+$tab_performance.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
+$tab_control.Controls.Add($tab_performance)
+$y_pos_performance = 20
+foreach ($category in $tweak_categories_performance) {
+    $checkbox = New-Object System.Windows.Forms.CheckBox
+    $checkbox.Location = New-Object System.Drawing.Point(20, $y_pos_performance)
+    $checkbox.Size = New-Object System.Drawing.Size(500, 30)
+    $checkbox.Text = $category
+    $checkbox.Font = $font
+    $checkbox.ForeColor = [System.Drawing.Color]::White
+    $tab_performance.Controls.Add($checkbox)
+    $checkboxes[$category] = $checkbox
+    $y_pos_performance += 35
+}
+
+# Debloat Tab
+$tab_debloat = New-Object System.Windows.Forms.TabPage "Debloat"
+$tab_debloat.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
+$tab_control.Controls.Add($tab_debloat)
+$y_pos_debloat = 20
+foreach ($category in $tweak_categories_debloat) {
+    $checkbox = New-Object System.Windows.Forms.CheckBox
+    $checkbox.Location = New-Object System.Drawing.Point(20, $y_pos_debloat)
+    $checkbox.Size = New-Object System.Drawing.Size(500, 30)
+    $checkbox.Text = $category
+    $checkbox.Font = $font
+    $checkbox.ForeColor = [System.Drawing.Color]::White
+    $tab_debloat.Controls.Add($checkbox)
+    $checkboxes[$category] = $checkbox
+    $y_pos_debloat += 35
+}
+
+# External Tools Tab (for O&O ShutUp10++)
+$tab_externaltools = New-Object System.Windows.Forms.TabPage "External Tools"
+$tab_externaltools.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
+$tab_control.Controls.Add($tab_externaltools)
+
+# Add the O&O ShutUp10++ button directly to this tab
+$btn_oosu10_tab = New-Object System.Windows.Forms.Button
+$btn_oosu10_tab.Location = New-Object System.Drawing.Point(20, 20) # Position within the tab
+$btn_oosu10_tab.Size = New-Object System.Drawing.Size(200, 40)
+$btn_oosu10_tab.Text = "Launch O&O ShutUp10++"
+$btn_oosu10_tab.Font = $font
+$btn_oosu10_tab.BackColor = [System.Drawing.Color]::FromArgb(107, 33, 107) # Distinct color
+$btn_oosu10_tab.FlatStyle = 'Flat'
+$btn_oosu10_tab.FlatAppearance.BorderSize = 0
+$tab_externaltools.Controls.Add($btn_oosu10_tab)
+
+# Link the button on the tab to the existing OOSU10 function
+$btn_oosu10_tab.Add_Click({
+    Invoke-OOSU10 -OutputBox $output_box -StatusLabel $status_label # Pass status label
+})
+
+# --- Create ToolTip object and assign tooltips to checkboxes ---
+$tooltip = New-Object System.Windows.Forms.ToolTip
+$tooltip.AutoPopDelay = 5000 # Time the tooltip remains visible (5 seconds)
+$tooltip.InitialDelay = 500 # Time before tooltip appears (0.5 seconds)
+$tooltip.ReshowDelay = 100 # Time to wait before showing subsequent tooltips
+
+# Loop through all checkboxes and set their tooltips
+foreach ($category in $checkboxes.Keys) {
+    $checkbox = $checkboxes[$category]
+    switch ($category) {
+        "Delete Temporary Files" { $tooltip.SetToolTip($checkbox, "Removes temporary system and user files to free up disk space. This action is irreversible.") }
+        "Disable Hibernation" { $tooltip.SetToolTip($checkbox, "Disables the hibernation feature (hiberfil.sys), freeing up significant disk space. You will no longer have the 'Hibernate' power option.") }
+        "Optimize Services" { $tooltip.SetToolTip($checkbox, "Adjusts the startup type of various non-essential Windows services to 'Manual' or 'Disabled' to improve system performance.") }
+        "Disable Telemetry & Consumer Features" { $tooltip.SetToolTip($checkbox, "Reduces data collection by Microsoft and disables consumer-oriented features like suggested apps and ads.") }
+        "Disable Activity History" { $tooltip.SetToolTip($checkbox, "Prevents Windows from collecting and syncing your activity history across devices.") }
+        "Disable Game DVR" { $tooltip.SetToolTip($checkbox, "Disables the Xbox Game Bar's background recording and screenshot features, which can consume system resources.") }
+        "Disable Background Apps" { $tooltip.SetToolTip($checkbox, "Prevents Universal Windows Platform (UWP) apps from running in the background when not actively in use.") }
+        "Disable Storage Sense" { $tooltip.SetToolTip($checkbox, "Turns off Storage Sense, Windows' automatic disk cleanup feature.") }
+        "Disable WiFi Sense" { $tooltip.SetToolTip($checkbox, "Disables features that automatically connect to open Wi-Fi hotspots and share Wi-Fi network credentials.") }
+        "Disable Teredo" { $tooltip.SetToolTip($checkbox, "Disables the Teredo tunneling interface, which is primarily used for IPv6 connectivity over IPv4 networks. Can improve network performance in some cases.") }
+        "Disable Recall (Windows 11)" { $tooltip.SetToolTip($checkbox, "Disables the Windows Recall feature, which captures screenshots of your activity. This requires a system restart to take full effect.") }
+        "Debloat Microsoft Edge" { $tooltip.SetToolTip($checkbox, "Applies registry tweaks to disable various non-essential features and reporting in Microsoft Edge.") }
+        "Adobe Debloat" { $tooltip.SetToolTip($checkbox, "Attempts to disable or rename non-essential Adobe background services and processes.") }
+        "Network Optimizations" { $tooltip.SetToolTip($checkbox, "Optimizes network settings by disabling Nagle's algorithm (TcpNoDelay) and flushing the DNS cache, which can reduce latency.") } # NEW: Tooltip for Network Optimizations
+        default { $tooltip.SetToolTip($checkbox, "No detailed information available for this tweak.") }
+    }
+}
+
+# --- Create Buttons (adjust positions for tabs) ---
 $btn_apply = New-Object System.Windows.Forms.Button
 $btn_apply.Location = New-Object System.Drawing.Point(405, 535) # Adjusted position
 $btn_apply.Size = New-Object System.Drawing.Size(160, 40) # Adjusted size
@@ -364,17 +505,6 @@ $btn_deselect_all.FlatStyle = 'Flat'
 $btn_deselect_all.FlatAppearance.BorderSize = 0
 $main_form.Controls.Add($btn_deselect_all)
 
-# --- NEW BUTTON for O&O ShutUp10++ ---
-$btn_oosu10 = New-Object System.Windows.Forms.Button
-$btn_oosu10.Location = New-Object System.Drawing.Point(220, 535) # Positioned between other buttons
-$btn_oosu10.Size = New-Object System.Drawing.Size(175, 40)
-$btn_oosu10.Text = "Launch O&O ShutUp10++"
-$btn_oosu10.Font = $font
-$btn_oosu10.BackColor = [System.Drawing.Color]::FromArgb(107, 33, 107) # Distinct color
-$btn_oosu10.FlatStyle = 'Flat'
-$btn_oosu10.FlatAppearance.BorderSize = 0
-$main_form.Controls.Add($btn_oosu10)
-
 # --- Output Log Textbox ---
 $output_box = New-Object System.Windows.Forms.RichTextBox
 $output_box.Location = New-Object System.Drawing.Point(20, 590)
@@ -385,7 +515,21 @@ $output_box.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
 $output_box.ForeColor = [System.Drawing.Color]::White
 $output_box.BorderStyle = 'FixedSingle'
 $main_form.Controls.Add($output_box)
-Write-Log -Message "Ready. Select tweaks and click 'Apply'." -OutputBox $output_box
+
+# --- Status Bar ---
+$status_strip = New-Object System.Windows.Forms.StatusStrip
+$status_strip.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30) # Match background
+$status_strip.ForeColor = [System.Drawing.Color]::White
+$main_form.Controls.Add($status_strip)
+
+$status_label = New-Object System.Windows.Forms.ToolStripStatusLabel
+$status_label.Text = "Ready. Select tweaks and click 'Apply'."
+$status_label.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$status_label.ForeColor = [System.Drawing.Color]::White
+$status_strip.Items.Add($status_label)
+
+# Initial log message (now also updates status bar)
+Write-Log -Message "Ready. Select tweaks and click 'Apply'." -OutputBox $output_box -StatusLabel $status_label
 
 #================================================================================================
 # 4. EVENT HANDLERS
@@ -400,38 +544,129 @@ $btn_deselect_all.Add_Click({
     $checkboxes.Values | ForEach-Object { $_.Checked = $false }
 })
 
-$btn_oosu10.Add_Click({
-    Invoke-OOSU10 -OutputBox $output_box
-})
-
+# --- Modified Apply Button Click Event with Confirmation Dialogs and Status Bar Updates ---
 $btn_apply.Add_Click({
+    # Store original text for restoration
+    $originalButtonText = $btn_apply.Text
+
     # Disable button to prevent multiple clicks during execution
     $btn_apply.Enabled = $false
-    $btn_apply.Text = "Working..."
     $output_box.Clear()
+    $status_label.Text = "" # Clear status bar at start
 
-    Write-Log -Message "Starting optimizations..." -OutputBox $output_box
+    Write-Log -Message "Starting optimizations..." -OutputBox $output_box -StatusLabel $status_label
 
-    # Execute checked functions in order
-    if ($checkboxes["Delete Temporary Files"].Checked) { Invoke-DeleteTempFiles -OutputBox $output_box }
-    if ($checkboxes["Disable Hibernation"].Checked) { Invoke-DisableHibernation -OutputBox $output_box }
-    if ($checkboxes["Optimize Services"].Checked) { Invoke-OptimizeServices -OutputBox $output_box }
-    if ($checkboxes["Disable Telemetry & Consumer Features"].Checked) { Invoke-DisableTelemetry -OutputBox $output_box }
-    if ($checkboxes["Disable Activity History"].Checked) { Invoke-DisableActivityHistory -OutputBox $output_box }
-    if ($checkboxes["Disable Game DVR"].Checked) { Invoke-DisableGameDVR -OutputBox $outputBox }
-    if ($checkboxes["Disable Background Apps"].Checked) { Invoke-DisableBackgroundApps -OutputBox $output_box }
-    if ($checkboxes["Disable Storage Sense"].Checked) { Invoke-DisableStorageSense -OutputBox $output_box }
-    if ($checkboxes["Disable WiFi Sense"].Checked) { Invoke-DisableWifiSense -OutputBox $output_box }
-    if ($checkboxes["Disable Teredo"].Checked) { Invoke-DisableTeredo -OutputBox $output_box }
-    if ($checkboxes["Disable Recall (Windows 11)"].Checked) { Invoke-DisableRecall -OutputBox $output_box }
-    if ($checkboxes["Debloat Microsoft Edge"].Checked) { Invoke-DebloatEdge -OutputBox $output_box }
-    if ($checkboxes["Adobe Debloat"].Checked) { Invoke-AdobeDebloat -OutputBox $output_box }
+    # Execute checked functions in order with progress updates and confirmations
+    if ($checkboxes["Delete Temporary Files"].Checked) {
+        $dialogResult = [System.Windows.Forms.MessageBox]::Show(
+            "Are you sure you want to delete temporary files? This action cannot be undone.",
+            "Confirm Delete Temporary Files",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        if ($dialogResult -eq [System.Windows.Forms.DialogResult]::Yes) {
+            $btn_apply.Text = "Working: Deleting Temp Files..." # Progress update
+            [System.Windows.Forms.Application]::DoEvents() # Force GUI refresh
+            Invoke-DeleteTempFiles -OutputBox $output_box -StatusLabel $status_label
+        } else {
+            Write-Log -Message "Skipped: Delete Temporary Files (User Cancelled)" -OutputBox $output_box -Color 'Orange' -StatusLabel $status_label
+        }
+    }
+
+    if ($checkboxes["Disable Hibernation"].Checked) {
+        $dialogResult = [System.Windows.Forms.MessageBox]::Show(
+            "Disabling hibernation will free up disk space but remove the ability to use the Hibernate power option. Are you sure?",
+            "Confirm Disable Hibernation",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        if ($dialogResult -eq [System.Windows.Forms.DialogResult]::Yes) {
+            $btn_apply.Text = "Working: Disabling Hibernation..." # Progress update
+            [System.Windows.Forms.Application]::DoEvents()
+            Invoke-DisableHibernation -OutputBox $output_box -StatusLabel $status_label
+        } else {
+            Write-Log -Message "Skipped: Disable Hibernation (User Cancelled)" -OutputBox $output_box -Color 'Orange' -StatusLabel $status_label
+        }
+    }
+
+    if ($checkboxes["Optimize Services"].Checked) {
+        $btn_apply.Text = "Working: Optimizing Services..." # Progress update
+        [System.Windows.Forms.Application]::DoEvents()
+        Invoke-OptimizeServices -OutputBox $output_box -StatusLabel $status_label
+    }
+    if ($checkboxes["Disable Telemetry & Consumer Features"].Checked) {
+        $btn_apply.Text = "Working: Disabling Telemetry..." # Progress update
+        [System.Windows.Forms.Application]::DoEvents()
+        Invoke-DisableTelemetry -OutputBox $output_box -StatusLabel $status_label
+    }
+    if ($checkboxes["Disable Activity History"].Checked) {
+        $btn_apply.Text = "Working: Disabling Activity History..." # Progress update
+        [System.Windows.Forms.Application]::DoEvents()
+        Invoke-DisableActivityHistory -OutputBox $output_box -StatusLabel $status_label
+    }
+    if ($checkboxes["Disable Game DVR"].Checked) {
+        $btn_apply.Text = "Working: Disabling Game DVR..." # Progress update
+        [System.Windows.Forms.Application]::DoEvents()
+        Invoke-DisableGameDVR -OutputBox $output_box -StatusLabel $status_label
+    }
+    if ($checkboxes["Disable Background Apps"].Checked) {
+        $btn_apply.Text = "Working: Disabling Background Apps..." # Progress update
+        [System.Windows.Forms.Application]::DoEvents()
+        Invoke-DisableBackgroundApps -OutputBox $output_box -StatusLabel $status_label
+    }
+    if ($checkboxes["Disable Storage Sense"].Checked) {
+        $btn_apply.Text = "Working: Disabling Storage Sense..." # Progress update
+        [System.Windows.Forms.Application]::DoEvents()
+        Invoke-DisableStorageSense -OutputBox $output_box -StatusLabel $status_label
+    }
+    if ($checkboxes["Disable WiFi Sense"].Checked) {
+        $btn_apply.Text = "Working: Disabling WiFi Sense..." # Progress update
+        [System.Windows.Forms.Application]::DoEvents()
+        Invoke-DisableWifiSense -OutputBox $output_box -StatusLabel $status_label
+    }
+    if ($checkboxes["Disable Teredo"].Checked) {
+        $btn_apply.Text = "Working: Disabling Teredo..." # Progress update
+        [System.Windows.Forms.Application]::DoEvents()
+        Invoke-DisableTeredo -OutputBox $output_box -StatusLabel $status_label
+    }
+    if ($checkboxes["Disable Recall (Windows 11)"].Checked) {
+        $dialogResult = [System.Windows.Forms.MessageBox]::Show(
+            "Disabling Windows Recall is a significant system change. Are you sure you want to proceed?",
+            "Confirm Disable Windows Recall",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        if ($dialogResult -eq [System.Windows.Forms.DialogResult]::Yes) {
+            $btn_apply.Text = "Working: Disabling Recall..." # Progress update
+            [System.Windows.Forms.Application]::DoEvents()
+            Invoke-DisableRecall -OutputBox $output_box -StatusLabel $status_label
+        } else {
+            Write-Log -Message "Skipped: Disable Recall (Windows 11) (User Cancelled)" -OutputBox $output_box -Color 'Orange' -StatusLabel $status_label
+        }
+    }
+    if ($checkboxes["Debloat Microsoft Edge"].Checked) {
+        $btn_apply.Text = "Working: Debloating Edge..." # Progress update
+        [System.Windows.Forms.Application]::DoEvents()
+        Invoke-DebloatEdge -OutputBox $output_box -StatusLabel $status_label
+    }
+    if ($checkboxes["Adobe Debloat"].Checked) {
+        $btn_apply.Text = "Working: Debloating Adobe..." # Progress update
+        [System.Windows.Forms.Application]::DoEvents()
+        Invoke-AdobeDebloat -OutputBox $output_box -StatusLabel $status_label
+    }
+    # NEW: Call Network Optimizations if checked
+    if ($checkboxes["Network Optimizations"].Checked) {
+        $btn_apply.Text = "Working: Optimizing Network..." # Progress update
+        [System.Windows.Forms.Application]::DoEvents()
+        Invoke-NetworkOptimizations -OutputBox $output_box -StatusLabel $status_label
+    }
     
-    Write-Log -Message "--- ALL TASKS COMPLETE ---" -OutputBox $output_box -Color 'Gold'
+    Write-Log -Message "--- ALL TASKS COMPLETE ---" -OutputBox $output_box -Color 'Gold' -StatusLabel $status_label
 
-    # Re-enable button
+    # Re-enable button and restore original text
     $btn_apply.Enabled = $true
-    $btn_apply.Text = "Apply Selected Tweaks"
+    $btn_apply.Text = $originalButtonText
+    $status_label.Text = "All tasks completed successfully." # Final status message
 })
 
 #================================================================================================
