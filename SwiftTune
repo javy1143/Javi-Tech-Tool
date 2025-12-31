@@ -1,676 +1,1671 @@
 #================================================================================================
-# 1. ADMIN & ASSEMBLY SETUP
+# Windows 11 Tuner / Optimization Tool (WinForms)
+# Version: 2.8 (type-safe registry, backup/restore, robust tasks, state detection, background worker, guardrails)
 #================================================================================================
 
-# --- Request Administrator Privileges ---
-# This section checks if the script is running as an administrator. If not, it re-launches itself with admin rights.
-if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    # If not running as admin, show a console message and restart the script with admin rights.
-    Write-Warning "Administrator privileges are required. Attempting to re-launch as administrator..."
-    Start-Process powershell.exe -Verb RunAs -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $MyInvocation.MyCommand.Path)
+#requires -Version 5.1
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+#------------------------------------------------------------------------------------------------
+# 1) Admin Elevation
+#------------------------------------------------------------------------------------------------
+function Test-IsAdmin {
+    try {
+        $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { return $false }
+}
+
+if (-not (Test-IsAdmin)) {
+    Write-Warning "Administrator privileges are required. Re-launching elevated..."
+    Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", "`"$($MyInvocation.MyCommand.Path)`""
+    )
     return
 }
 
-# --- Load Windows Forms Assemblies ---
-# These assemblies are required to build the GUI.
+#------------------------------------------------------------------------------------------------
+# 2) Assemblies
+#------------------------------------------------------------------------------------------------
 try {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
-}
-catch {
-    Write-Error "Failed to load required .NET Assemblies for GUI. Please ensure you are running on a Windows system with .NET Framework."
-    pause
-    exit
+} catch {
+    Write-Error "Failed to load WinForms assemblies: $($_.Exception.Message)"
+    return
 }
 
-#================================================================================================
-# 2. HELPER FUNCTIONS (TWEAKS)
-# These functions encapsulate the logic for each optimization category.
-#================================================================================================
 
-# --- Helper to log messages to the GUI's output box and status bar ---
+# Capture the main runspace so BackgroundWorker threads can execute PowerShell scriptblocks safely.
+$Script:MainRunspace = [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace
+#------------------------------------------------------------------------------------------------
+# 3) Paths & Constants
+#------------------------------------------------------------------------------------------------
+$Script:AppName    = "Windows 11 Tuner"
+$Script:AppVersion = "2.8"
+$Script:DataRoot   = Join-Path $env:ProgramData "Win11Tuner"
+$Script:BackupRoot = Join-Path $Script:DataRoot "Backups"
+$Script:LastRunPtr = Join-Path $Script:DataRoot "last_backup.json"
+
+New-Item -Path $Script:BackupRoot -ItemType Directory -Force | Out-Null
+
+#------------------------------------------------------------------------------------------------
+# 4) UI-safe Logging Helpers
+#------------------------------------------------------------------------------------------------
 function Write-Log {
     param(
-        [string]$Message,
-        [System.Windows.Forms.RichTextBox]$OutputBox,
+        [Parameter(Mandatory=$true)][string]$Message,
+        [Parameter(Mandatory=$true)][System.Windows.Forms.RichTextBox]$OutputBox,
         [System.Drawing.Color]$Color = [System.Drawing.Color]::White,
-        [System.Windows.Forms.ToolStripStatusLabel]$StatusLabel = $null # New parameter for status bar
+        [System.Windows.Forms.ToolStripStatusLabel]$StatusLabel = $null
     )
-    if ($OutputBox) {
-        $OutputBox.SelectionStart = $OutputBox.TextLength
-        $OutputBox.SelectionLength = 0
-        $OutputBox.SelectionColor = $Color
-        $OutputBox.AppendText("$(Get-Date -f 'HH:mm:ss') - $Message`n")
-        $OutputBox.ScrollToCaret()
-        $OutputBox.Refresh()
-    }
-    # Also write to the console host for debugging.
-    Write-Host "$(Get-Date -f 'HH:mm:ss') - $Message"
 
-    # Update the status bar label if provided
-    if ($StatusLabel) {
-        $StatusLabel.Text = "$Message"
-        [System.Windows.Forms.Application]::DoEvents() # Ensure status bar updates immediately
+    $ts = (Get-Date).ToString("HH:mm:ss")
+    $line = "$ts - $Message`r`n"
+
+    # WinForms controls must be updated on the UI thread. BackgroundWorker.DoWork runs off-thread.
+    $uiWork = [System.Windows.Forms.MethodInvoker]{
+        try {
+            $OutputBox.SelectionStart = $OutputBox.TextLength
+            $OutputBox.SelectionLength = 0
+            $OutputBox.SelectionColor = $Color
+            $OutputBox.AppendText($line)
+            $OutputBox.ScrollToCaret()
+            $OutputBox.Refresh()
+
+            if ($StatusLabel) { $StatusLabel.Text = $Message }
+        } catch { }
+    }
+
+    try {
+        if ($OutputBox.InvokeRequired) {
+            [void]$OutputBox.BeginInvoke($uiWork)
+        } else {
+            $uiWork.Invoke()
+        }
+    } catch {
+        # If UI logging fails for any reason, do not break the run.
+        try { Write-Host $Message } catch { }
+        return
+    }
+
+    try { Write-Host $Message } catch { }
+}
+
+
+#------------------------------------------------------------------------------------------------
+# 5) Registry Utilities (type-safe)
+#------------------------------------------------------------------------------------------------
+function Invoke-ProcessLogged {
+    param(
+        [Parameter(Mandatory=$true)][string]$FilePath,
+        [Parameter(Mandatory=$true)][string]$Arguments,
+        [Parameter(Mandatory=$true)][string]$Title,
+        [Parameter(Mandatory=$true)][System.Windows.Forms.RichTextBox]$OutputBox,
+        [Parameter(Mandatory=$true)][System.Windows.Forms.ToolStripStatusLabel]$StatusLabel
+    )
+    Write-Log -Message "$($Title): starting..." -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $psi.Arguments = $Arguments
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow  = $true
+
+    $p = New-Object System.Diagnostics.Process
+    $p.StartInfo = $psi
+
+    try {
+        [void]$p.Start()
+    } catch {
+        throw "Failed to start process '$FilePath'. $($_.Exception.Message)"
+    }
+
+    # Read output incrementally to avoid buffer deadlocks and keep UI responsive.
+    while (-not $p.HasExited) {
+        try {
+            while (-not $p.StandardOutput.EndOfStream) {
+                $line = $p.StandardOutput.ReadLine()
+                if ($null -ne $line -and $line.Trim().Length -gt 0) {
+                    Write-Log -Message $line -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+                }
+            }
+            while (-not $p.StandardError.EndOfStream) {
+                $eline = $p.StandardError.ReadLine()
+                if ($null -ne $eline -and $eline.Trim().Length -gt 0) {
+                    Write-Log -Message $eline -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel
+                }
+            }
+        } catch { }
+
+        if ($Script:ApplyRun -and $Script:ApplyRun.CancelRequested) {
+            try { $p.Kill() } catch { }
+            throw "Cancelled."
+        }
+
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 75
+    }
+
+    # Drain remaining output
+    try {
+        while (-not $p.StandardOutput.EndOfStream) {
+            $line = $p.StandardOutput.ReadLine()
+            if ($null -ne $line -and $line.Trim().Length -gt 0) {
+                Write-Log -Message $line -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+            }
+        }
+        while (-not $p.StandardError.EndOfStream) {
+            $eline = $p.StandardError.ReadLine()
+            if ($null -ne $eline -and $eline.Trim().Length -gt 0) {
+                Write-Log -Message $eline -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel
+            }
+        }
+    } catch { }
+
+    Write-Log -Message "$($Title): completed (exit code $($p.ExitCode))." -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel
+    return $p.ExitCode
+}
+
+
+function Convert-RegistryPath {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    $p = $Path.Trim()
+    if ($p -match '^(HKLM|HKEY_LOCAL_MACHINE):\\') { return @{ Hive = "LocalMachine"; SubKey = $p -replace '^(HKLM|HKEY_LOCAL_MACHINE):\\','' } }
+    if ($p -match '^(HKCU|HKEY_CURRENT_USER):\\')  { return @{ Hive = "CurrentUser";  SubKey = $p -replace '^(HKCU|HKEY_CURRENT_USER):\\','' } }
+    if ($p -match '^(HKCR|HKEY_CLASSES_ROOT):\\')  { return @{ Hive = "ClassesRoot";  SubKey = $p -replace '^(HKCR|HKEY_CLASSES_ROOT):\\','' } }
+    if ($p -match '^(HKU|HKEY_USERS):\\')          { return @{ Hive = "Users";       SubKey = $p -replace '^(HKU|HKEY_USERS):\\','' } }
+    if ($p -match '^(HKCC|HKEY_CURRENT_CONFIG):\\'){ return @{ Hive = "CurrentConfig";SubKey = $p -replace '^(HKCC|HKEY_CURRENT_CONFIG):\\','' } }
+
+    throw "Unsupported registry root in path: $Path"
+}
+
+function Ensure-RegKey { param([Parameter(Mandatory=$true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
+}
+
+function Get-RegValueInfo {
+    param([Parameter(Mandatory=$true)][string]$Path,[Parameter(Mandatory=$true)][string]$Name)
+    $conv = Convert-RegistryPath -Path $Path
+    $hive = [Microsoft.Win32.Registry]::$($conv.Hive)
+    $key  = $hive.OpenSubKey($conv.SubKey, $false)
+    if (-not $key) { return [pscustomobject]@{ ExistsKey=$false; ExistsValue=$false; Value=$null; Kind=$null } }
+    try {
+        if ($key.GetValueNames() -notcontains $Name) { return [pscustomobject]@{ ExistsKey=$true; ExistsValue=$false; Value=$null; Kind=$null } }
+        $val  = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $kind = $key.GetValueKind($Name).ToString()
+        return [pscustomobject]@{ ExistsKey=$true; ExistsValue=$true; Value=$val; Kind=$kind }
+    } finally { $key.Close() }
+}
+
+function Set-RegValueSafe {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Name,
+        [Parameter(Mandatory=$true)]$Value,
+        [Parameter(Mandatory=$true)][ValidateSet("DWord","QWord","String","ExpandString","MultiString","Binary")][string]$Type
+    )
+    Ensure-RegKey -Path $Path
+    $conv = Convert-RegistryPath -Path $Path
+    $hive = [Microsoft.Win32.Registry]::$($conv.Hive)
+    $key  = $hive.CreateSubKey($conv.SubKey)
+    try { $key.SetValue($Name, $Value, ([Microsoft.Win32.RegistryValueKind]::$Type)) }
+    finally { $key.Close() }
+}
+
+function Remove-RegValueSafe {
+    param([Parameter(Mandatory=$true)][string]$Path,[Parameter(Mandatory=$true)][string]$Name)
+    $conv = Convert-RegistryPath -Path $Path
+    $hive = [Microsoft.Win32.Registry]::$($conv.Hive)
+    $key  = $hive.OpenSubKey($conv.SubKey, $true)
+    if (-not $key) { return }
+    try { if ($key.GetValueNames() -contains $Name) { $key.DeleteValue($Name, $false) } }
+    finally { $key.Close() }
+}
+
+#------------------------------------------------------------------------------------------------
+# 6) Backup Context + Restore
+#------------------------------------------------------------------------------------------------
+function New-BackupContext {
+    [ordered]@{
+        Registry = @{}  # "Path|Name" -> {Path,Name,ExistsKey,ExistsValue,Value,Kind}
+        Services = @{}  # ServiceName -> {Name,Exists,StartupType,DelayedAutoStart}
+        Tasks    = @{}  # FullTaskName -> {FullName,Exists,State}
+        Files    = @{}  # Key -> {Key,Kind,OriginalPath,BackupPath,ExistsOriginal,ExistsBackup}
+        Features = @{}  # FeatureName -> {Name,Exists,State}
     }
 }
 
-# --- Helper for setting registry values safely ---
+function Backup-RegValue { param([hashtable]$Ctx,[string]$Path,[string]$Name)
+    $k = "$Path|$Name"
+    if (-not $Ctx.Registry.ContainsKey($k)) {
+        $info = Get-RegValueInfo -Path $Path -Name $Name
+        $Ctx.Registry[$k] = [ordered]@{
+            Path=$Path; Name=$Name
+            ExistsKey=$info.ExistsKey; ExistsValue=$info.ExistsValue
+            Value=$info.Value; Kind=$info.Kind
+        }
+    }
+}
+
+function Restore-RegValue { param([hashtable]$Record)
+    if (-not $Record.ExistsKey -or -not $Record.ExistsValue) {
+        Remove-RegValueSafe -Path $Record.Path -Name $Record.Name
+        return
+    }
+    $kind = if ($Record.Kind) { [string]$Record.Kind } else { "String" }
+    Set-RegValueSafe -Path $Record.Path -Name $Record.Name -Value $Record.Value -Type $kind
+}
+
+function Get-ServiceStartupInfo {
+    param([Parameter(Mandatory=$true)][string]$Name)
+    try {
+        $svc = Get-CimInstance -ClassName Win32_Service -Filter "Name='$Name'"
+        if (-not $svc) { return [pscustomobject]@{ Exists=$false } }
+        $delayed = $false
+        try {
+            $reg = Get-RegValueInfo -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name "DelayedAutostart"
+            if ($reg.ExistsValue -and ([int]$reg.Value -eq 1)) { $delayed = $true }
+        } catch { }
+        $startup = switch ($svc.StartMode) {
+            "Auto"     { if ($delayed) { "AutomaticDelayedStart" } else { "Automatic" } }
+            "Manual"   { "Manual" }
+            "Disabled" { "Disabled" }
+            default    { "Manual" }
+        }
+        return [pscustomobject]@{ Exists=$true; StartupType=$startup; DelayedAutoStart=$delayed }
+    } catch { return [pscustomobject]@{ Exists=$false } }
+}
+
+function Backup-Service { param([hashtable]$Ctx,[string]$Name)
+    if (-not $Ctx.Services.ContainsKey($Name)) {
+        $info = Get-ServiceStartupInfo -Name $Name
+        $Ctx.Services[$Name] = [ordered]@{
+            Name=$Name
+            Exists=[bool]$info.Exists
+            StartupType= if ($info.Exists) { $info.StartupType } else { $null }
+            DelayedAutoStart= if ($info.Exists) { [bool]$info.DelayedAutoStart } else { $null }
+        }
+    }
+}
+
+function Set-ServiceStartupTypeSafe {
+    param([Parameter(Mandatory=$true)][string]$Name,[Parameter(Mandatory=$true)][ValidateSet("Automatic","Manual","Disabled","AutomaticDelayedStart")][string]$StartupType)
+    if ($StartupType -eq "AutomaticDelayedStart") {
+        Set-Service -Name $Name -StartupType Automatic
+        Set-RegValueSafe -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name "DelayedAutostart" -Value 1 -Type DWord
+    } else {
+        Set-Service -Name $Name -StartupType $StartupType
+        try { Set-RegValueSafe -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name "DelayedAutostart" -Value 0 -Type DWord } catch { }
+    }
+}
+
+function Restore-Service { param([hashtable]$Record)
+    if (-not $Record.Exists) { return }
+    if (-not $Record.StartupType) { return }
+    Set-ServiceStartupTypeSafe -Name $Record.Name -StartupType $Record.StartupType
+}
+
+function Split-TaskFullName {
+    param([Parameter(Mandatory=$true)][string]$FullName)
+    $n = $FullName.Trim()
+    if (-not $n.StartsWith("\")) { $n = "\" + $n }
+    $idx = $n.LastIndexOf("\")
+    if ($idx -lt 1) { throw "Invalid task name: $FullName" }
+    [pscustomobject]@{
+        FullName=$n
+        TaskPath=$n.Substring(0,$idx+1)
+        TaskName=$n.Substring($idx+1)
+    }
+}
+
+function Get-TaskStateSafe { param([Parameter(Mandatory=$true)][string]$FullName)
+    try {
+        $split = Split-TaskFullName -FullName $FullName
+        $t = Get-ScheduledTask -TaskPath $split.TaskPath -TaskName $split.TaskName -ErrorAction Stop
+        [pscustomobject]@{ Exists=$true; State=$t.State.ToString() }
+    } catch { [pscustomobject]@{ Exists=$false; State=$null } }
+}
+
+function Backup-Task { param([hashtable]$Ctx,[string]$FullName)
+    if (-not $Ctx.Tasks.ContainsKey($FullName)) {
+        $info = Get-TaskStateSafe -FullName $FullName
+        $Ctx.Tasks[$FullName] = [ordered]@{
+            FullName=(Split-TaskFullName -FullName $FullName).FullName
+            Exists=[bool]$info.Exists
+            State=$info.State
+        }
+    }
+}
+
+function Disable-TaskRobust { param([Parameter(Mandatory=$true)][string]$FullName)
+    $split = Split-TaskFullName -FullName $FullName
+    try { Disable-ScheduledTask -TaskPath $split.TaskPath -TaskName $split.TaskName -ErrorAction Stop | Out-Null }
+    catch { & schtasks.exe /Change /TN $split.FullName /Disable | Out-Null }
+}
+
+function Enable-TaskRobust { param([Parameter(Mandatory=$true)][string]$FullName)
+    $split = Split-TaskFullName -FullName $FullName
+    try { Enable-ScheduledTask -TaskPath $split.TaskPath -TaskName $split.TaskName -ErrorAction Stop | Out-Null }
+    catch { & schtasks.exe /Change /TN $split.FullName /Enable | Out-Null }
+}
+
+function Restore-Task { param([hashtable]$Record)
+    if (-not $Record.Exists) { return }
+    if ($Record.State -eq "Disabled") { Disable-TaskRobust -FullName $Record.FullName }
+    else { Enable-TaskRobust -FullName $Record.FullName }
+}
+
+function Get-OptionalFeatureStateSafe { param([Parameter(Mandatory=$true)][string]$Name)
+    try {
+        $f = Get-WindowsOptionalFeature -Online -FeatureName $Name -ErrorAction Stop
+        [pscustomobject]@{ Exists=$true; State=$f.State.ToString() }
+    } catch { [pscustomobject]@{ Exists=$false; State=$null } }
+}
+
+function Backup-Feature { param([hashtable]$Ctx,[string]$Name)
+    if (-not $Ctx.Features.ContainsKey($Name)) {
+        $info = Get-OptionalFeatureStateSafe -Name $Name
+        $Ctx.Features[$Name] = [ordered]@{ Name=$Name; Exists=[bool]$info.Exists; State=$info.State }
+    }
+}
+
+function Restore-Feature { param([hashtable]$Record)
+    if (-not $Record.Exists) { return }
+    if ($Record.State -eq "Enabled") { & DISM.exe /Online /Enable-Feature /FeatureName:$($Record.Name) /NoRestart | Out-Null }
+    elseif ($Record.State -eq "Disabled") { & DISM.exe /Online /Disable-Feature /FeatureName:$($Record.Name) /NoRestart | Out-Null }
+}
+
+function Backup-FileRename {
+    param([hashtable]$Ctx,[Parameter(Mandatory=$true)][string]$OriginalPath,[Parameter(Mandatory=$true)][string]$BackupPath)
+    $k = "rename|$OriginalPath|$BackupPath"
+    if (-not $Ctx.Files.ContainsKey($k)) {
+        $Ctx.Files[$k] = [ordered]@{
+            Key=$k; Kind="rename"
+            OriginalPath=$OriginalPath; BackupPath=$BackupPath
+            ExistsOriginal=(Test-Path -LiteralPath $OriginalPath)
+            ExistsBackup=(Test-Path -LiteralPath $BackupPath)
+        }
+    }
+}
+
+function Restore-FileRecord {
+    param([hashtable]$Record)
+    if ($Record.Kind -ne "rename") { return }
+    $orig = $Record.OriginalPath
+    $bak  = $Record.BackupPath
+
+    # Pre-state: original existed. Ensure it exists after restore.
+    if ($Record.ExistsOriginal) {
+        if (-not (Test-Path -LiteralPath $orig) -and (Test-Path -LiteralPath $bak)) {
+            try { Rename-Item -LiteralPath $bak -NewName (Split-Path -Leaf $orig) -Force -ErrorAction Stop } catch { }
+        }
+    }
+}
+
+function Save-BackupManifest {
+    param([Parameter(Mandatory=$true)][hashtable]$BackupCtx,[Parameter(Mandatory=$true)][string[]]$SelectedTweakIds)
+    $ts = Get-Date -Format "yyyyMMdd_HHmmss"
+    $path = Join-Path $Script:BackupRoot "backup_$ts.json"
+    $manifest = [ordered]@{
+        AppName=$Script:AppName; AppVersion=$Script:AppVersion
+        Timestamp=(Get-Date).ToString("o")
+        Computer=$env:COMPUTERNAME; User="$env:USERDOMAIN\$env:USERNAME"
+        SelectedTweakIds=$SelectedTweakIds
+        BackupCtx=$BackupCtx
+    }
+    ($manifest | ConvertTo-Json -Depth 10) | Set-Content -Path $path -Encoding UTF8
+    ($path | ConvertTo-Json) | Set-Content -Path $Script:LastRunPtr -Encoding UTF8
+    return $path
+}
+
+function Load-LastBackupPath {
+    if (-not (Test-Path -LiteralPath $Script:LastRunPtr)) { return $null }
+    try {
+        $p = Get-Content -Path $Script:LastRunPtr -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($p -and (Test-Path -LiteralPath $p)) { return [string]$p }
+        return $null
+    } catch { return $null }
+}
+
+function Restore-FromManifest {
+    param([Parameter(Mandatory=$true)][string]$ManifestPath,[Parameter(Mandatory=$true)][System.Windows.Forms.RichTextBox]$OutputBox,[System.Windows.Forms.ToolStripStatusLabel]$StatusLabel=$null)
+
+    $m = Get-Content -Path $ManifestPath -Raw | ConvertFrom-Json
+    Write-Log -Message "Restoring from: $ManifestPath" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+
+    foreach ($kv in $m.BackupCtx.Registry.PSObject.Properties) { Restore-RegValue -Record $kv.Value }
+    foreach ($kv in $m.BackupCtx.Services.PSObject.Properties) { Restore-Service -Record $kv.Value }
+    foreach ($kv in $m.BackupCtx.Tasks.PSObject.Properties)    { Restore-Task -Record $kv.Value }
+    foreach ($kv in $m.BackupCtx.Files.PSObject.Properties)    { Restore-FileRecord -Record $kv.Value }
+    foreach ($kv in $m.BackupCtx.Features.PSObject.Properties) { Restore-Feature -Record $kv.Value }
+
+    Write-Log -Message "Restore complete. A reboot may be required." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+}
+
+#------------------------------------------------------------------------------------------------
+# 7) High-level Safe Setters (auto-backup)
+#------------------------------------------------------------------------------------------------
 function Set-RegValue {
     param(
-        [string]$Path,
-        [string]$Name,
-        $Value,
-        [string]$Type = "DWord",
+        [Parameter(Mandatory=$true)][hashtable]$BackupCtx,
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Name,
+        [Parameter(Mandatory=$true)]$Value,
+        [Parameter(Mandatory=$true)][ValidateSet("DWord","QWord","String","ExpandString","MultiString","Binary")][string]$Type,
         [System.Windows.Forms.RichTextBox]$OutputBox,
-        [System.Windows.Forms.ToolStripStatusLabel]$StatusLabel # Pass through status label
+        [System.Windows.Forms.ToolStripStatusLabel]$StatusLabel
     )
-    try {
-        if (-not (Test-Path $Path)) {
-            Write-Log -Message "Creating registry path: $Path" -OutputBox $OutputBox -Color 'Yellow' -StatusLabel $StatusLabel
-            New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
-        }
-        Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force -ErrorAction Stop
-        Write-Log -Message "Set [$Name] in [$Path]" -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
-    }
-    catch {
-        Write-Log -Message "ERROR: Failed to set registry value $Name at $Path. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
-    }
+    Backup-RegValue -Ctx $BackupCtx -Path $Path -Name $Name
+    Set-RegValueSafe -Path $Path -Name $Name -Value $Value -Type $Type
+    if ($OutputBox) { Write-Log -Message "Registry set: $Path [$Name] = $Value ($Type)" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel }
 }
 
-# --- Helper for setting service startup types ---
-function Set-ServiceStatus {
+function Set-ServiceStartup {
     param(
-        [string]$Name,
-        [string]$StartupType,
+        [Parameter(Mandatory=$true)][hashtable]$BackupCtx,
+        [Parameter(Mandatory=$true)][string]$Name,
+        [Parameter(Mandatory=$true)][ValidateSet("Automatic","Manual","Disabled","AutomaticDelayedStart")][string]$StartupType,
         [System.Windows.Forms.RichTextBox]$OutputBox,
-        [System.Windows.Forms.ToolStripStatusLabel]$StatusLabel # Pass through status label
+        [System.Windows.Forms.ToolStripStatusLabel]$StatusLabel
     )
-    try {
-        $svc = Get-Service -Name $name -ErrorAction Stop
-        if ($svc) {
-            Write-Log -Message "Setting service '$($svc.Name)' to $startupType" -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
-            Set-Service -Name $svc.Name -StartupType $startupType -ErrorAction Stop
+    Backup-Service -Ctx $BackupCtx -Name $Name
+    if (-not (Get-Service -Name $Name -ErrorAction SilentlyContinue)) {
+        Write-Log -Message "Service not found: $Name (skipping)" -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
+        return
+    }
+    Set-ServiceStartupTypeSafe -Name $Name -StartupType $StartupType
+    Write-Log -Message "Service startup set: $Name -> $StartupType" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+}
+
+function Disable-ScheduledTaskSafe {
+    param([Parameter(Mandatory=$true)][hashtable]$BackupCtx,[Parameter(Mandatory=$true)][string]$FullName,[System.Windows.Forms.RichTextBox]$OutputBox,[System.Windows.Forms.ToolStripStatusLabel]$StatusLabel)
+    Backup-Task -Ctx $BackupCtx -FullName $FullName
+    Disable-TaskRobust -FullName $FullName
+    Write-Log -Message "Task disabled: $FullName" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+}
+
+function Disable-OptionalFeatureSafe {
+    param([Parameter(Mandatory=$true)][hashtable]$BackupCtx,[Parameter(Mandatory=$true)][string]$Name,[System.Windows.Forms.RichTextBox]$OutputBox,[System.Windows.Forms.ToolStripStatusLabel]$StatusLabel)
+    Backup-Feature -Ctx $BackupCtx -Name $Name
+    $info = Get-OptionalFeatureStateSafe -Name $Name
+    if (-not $info.Exists) {
+        Write-Log -Message "Optional feature not present: $Name (skipping)" -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
+        return
+    }
+    Write-Log -Message "DISM: Disabling optional feature $Name" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
+    $p = Start-Process -FilePath "DISM.exe" -ArgumentList @("/Online","/Disable-Feature","/FeatureName:$Name","/NoRestart") -Wait -PassThru -WindowStyle Hidden
+    if ($p.ExitCode -notin 0,3010) { throw "DISM failed disabling $Name (ExitCode=$($p.ExitCode))" }
+    Write-Log -Message "Feature disabled: $Name (ExitCode=$($p.ExitCode))" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+}
+
+#------------------------------------------------------------------------------------------------
+# 8) Tweak Catalog (data-driven)
+#------------------------------------------------------------------------------------------------
+function New-Tweak {
+    param(
+        [Parameter(Mandatory=$true)][string]$Id,
+        [Parameter(Mandatory=$true)][string]$Name,
+        [Parameter(Mandatory=$true)][ValidateSet("Privacy","Performance","Debloat","Maintenance")][string]$Category,
+        [Parameter(Mandatory=$true)][string]$Description,
+        [ValidateSet("Low","Medium","High")][string]$Risk = "Low",
+        [bool]$RequiresReboot = $false,
+        [scriptblock]$IsAvailable = { return $true },
+        [scriptblock]$GetState = { return "Unknown" },  # Applied/NotApplied/Partial/Unknown/NotAvailable/N-A
+        [Parameter(Mandatory=$true)][scriptblock]$Apply,
+        [Parameter(Mandatory=$true)][scriptblock]$Undo
+    )
+    [pscustomobject]@{
+        Id=$Id; Name=$Name; Category=$Category; Description=$Description
+        Risk=$Risk; RequiresReboot=$RequiresReboot
+        IsAvailable=$IsAvailable; GetState=$GetState
+        Apply=$Apply; Undo=$Undo
+    }
+}
+
+function Compare-RegExpected { param([string]$Path,[string]$Name,[object]$Expected)
+    try { $i = Get-RegValueInfo -Path $Path -Name $Name; return ($i.ExistsValue -and ($i.Value -eq $Expected)) }
+    catch { return $false }
+}
+
+$Script:Tweaks = @()
+
+# --- Privacy tweaks ---
+$telemetryTasks = @(
+    "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
+    "\Microsoft\Windows\Application Experience\ProgramDataUpdater",
+    "\Microsoft\Windows\Autochk\Proxy",
+    "\Microsoft\Windows\Customer Experience Improvement Program\Consolidator",
+    "\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip",
+    "\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector",
+    "\Microsoft\Windows\Feedback\Siuf\DmClient",
+    "\Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload",
+    "\Microsoft\Windows\Windows Error Reporting\QueueReporting",
+    "\Microsoft\Windows\Application Experience\MareBackup",
+    "\Microsoft\Windows\Application Experience\StartupAppTask",
+    "\Microsoft\Windows\Application Experience\PcaPatchDbTask",
+    "\Microsoft\Windows\WindowsUpdate\Automatic App Update",
+    "\Microsoft\Windows\Maps\MapsUpdateTask"
+)
+
+$Script:Tweaks += New-Tweak `
+    -Id "privacy_activity" -Name "Disable Activity History" -Category "Privacy" `
+    -Description "Disables Activity Feed and prevents publishing/uploading user activities." `
+    -GetState {
+        $p="HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+        $a=Compare-RegExpected $p "EnableActivityFeed" 0
+        $b=Compare-RegExpected $p "PublishUserActivities" 0
+        $c=Compare-RegExpected $p "UploadUserActivities" 0
+        if ($a -and $b -and $c) { "Applied" } elseif (-not $a -and -not $b -and -not $c) { "NotApplied" } else { "Partial" }
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Disable Activity History ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        $p="HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "EnableActivityFeed" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "PublishUserActivities" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "UploadUserActivities" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+$Script:Tweaks += New-Tweak `
+    -Id "privacy_gamedvr" -Name "Disable Game DVR" -Category "Privacy" `
+    -Description "Disables Xbox Game DVR/recording features." `
+    -GetState {
+        $a=Compare-RegExpected "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 0
+        $b=Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" "AllowGameDVR" 0
+        if ($a -and $b) { "Applied" } elseif (-not $a -and -not $b) { "NotApplied" } else { "Partial" }
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Disable Game DVR ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\System\GameConfigStore" -Name "GameDVR_Enabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" -Name "AllowGameDVR" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+$Script:Tweaks += New-Tweak `
+    -Id "privacy_backgroundapps" `
+    -Name "Reduce Background Apps (Allow Teams/RingCentral/OneDrive)" `
+    -Category "Privacy" `
+    -Risk "Medium" `
+    -Description "Disables background execution for common consumer Store apps while keeping Microsoft Teams, RingCentral, and OneDrive allowed when applicable." `
+    -GetState {
+        $globalOk = Compare-RegExpected "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" "GlobalUserDisabled" 0
+        $consumer = @(
+            "Microsoft.BingNews","Microsoft.BingWeather","Microsoft.GetHelp","Microsoft.Getstarted","Microsoft.MicrosoftSolitaireCollection",
+            "Microsoft.People","Microsoft.WindowsFeedbackHub","Microsoft.XboxApp","Microsoft.XboxGameOverlay","Microsoft.XboxGamingOverlay",
+            "Microsoft.XboxIdentityProvider","Microsoft.XboxSpeechToTextOverlay","Microsoft.ZuneMusic","Microsoft.ZuneVideo","Microsoft.YourPhone","Microsoft.Todos"
+        )
+        $pkgs = @(Get-AppxPackage -ErrorAction SilentlyContinue)
+        $targets = @($pkgs | Where-Object { $consumer -contains $_.Name })
+        if ($targets.Count -eq 0) { if ($globalOk) { "N-A" } else { "NotApplied" } }
+        else {
+            $ok = 0
+            foreach ($p in $targets) {
+                $k = "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications\$($p.PackageFamilyName)"
+                if (Compare-RegExpected $k "Disabled" 1) { $ok++ }
+            }
+            $ratio = $ok / [double]$targets.Count
+            if ($globalOk -and ($ratio -ge 0.9)) { "Applied" }
+            elseif ((-not $globalOk) -and ($ok -eq 0)) { "NotApplied" }
+            else { "Partial" }
         }
-    }
-    catch {
-        Write-Log -Message "INFO: Service '$name' not found or couldn't be changed." -OutputBox $OutputBox -Color 'Gray' -StatusLabel $StatusLabel
-    }
-}
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Reduce Background Apps (Allow Teams/RingCentral/OneDrive) ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        # Ensure we do not globally block background execution (global block can break notifications).
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
 
-# --- Tweak Functions ---
-# Each Invoke- function now accepts $StatusLabel and passes it to Write-Log
-function Invoke-DeleteTempFiles {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Deleting Temporary Files ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    $paths = "C:\Windows\Temp", $env:TEMP
-    foreach ($p in $paths) {
-        Write-Log -Message "Cleaning folder: $p" -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
-        Get-ChildItem -Path $p -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-    }
-    Write-Log -Message "Temporary file cleanup complete." -OutputBox $OutputBox -StatusLabel $StatusLabel
-}
+        $consumer = @(
+            "Microsoft.BingNews","Microsoft.BingWeather","Microsoft.GetHelp","Microsoft.Getstarted","Microsoft.MicrosoftSolitaireCollection",
+            "Microsoft.People","Microsoft.WindowsFeedbackHub","Microsoft.XboxApp","Microsoft.XboxGameOverlay","Microsoft.XboxGamingOverlay",
+            "Microsoft.XboxIdentityProvider","Microsoft.XboxSpeechToTextOverlay","Microsoft.ZuneMusic","Microsoft.ZuneVideo","Microsoft.YourPhone","Microsoft.Todos"
+        )
+        $allowPatterns = @("MSTeams","Teams","RingCentral","OneDrive")
+        $pkgs = @(Get-AppxPackage -ErrorAction SilentlyContinue)
+        $changed = 0
 
-function Invoke-DisableTelemetry {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Disabling Telemetry & Consumer Features ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    # Disable Scheduled Tasks
-    $tasks = "Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser", "Microsoft\Windows\Application Experience\ProgramDataUpdater", "Microsoft\Windows\Autochk\Proxy", "Microsoft\Windows\Customer Experience Improvement Program\Consolidator", "Microsoft\Windows\Customer Experience Improvement Program\UsbCeip", "Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector", "Microsoft\Windows\Feedback\Siuf\DmClient", "Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload", "Microsoft\Windows\Windows Error Reporting\QueueReporting", "Microsoft\Windows\Application Experience\MareBackup", "Microsoft\Windows\Application Experience\StartupAppTask", "Microsoft\Windows\Application Experience\PcaPatchDbTask", "Microsoft\Windows\WindowsUpdate\Automatic App Update", "Microsoft\Windows\Maps\MapsUpdateTask" # Added Automatic App Update
-    foreach ($task in $tasks) {
-        Write-Log -Message "Disabling scheduled task: $task" -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
-        # Use try/catch for scheduled tasks as some might not exist on all systems
-        try {
-            Get-ScheduledTask -TaskPath "\$task" -ErrorAction Stop | Disable-ScheduledTask -ErrorAction Stop
-            Write-Log -Message "Task '$task' disabled." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
+        foreach ($p in $pkgs) {
+            $pf = [string]$p.PackageFamilyName
+            $name = [string]$p.Name
+            $isAllow = $false
+            foreach ($pat in $allowPatterns) { if ($pf -like "*$pat*" -or $name -like "*$pat*") { $isAllow = $true; break } }
+
+            # Only manage common consumer apps to reduce risk of breaking OS components.
+            if (-not $isAllow -and -not ($consumer -contains $name)) { continue }
+
+            $k = "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications\$pf"
+            if ($isAllow) {
+                Set-RegValue -BackupCtx $BackupCtx -Path $k -Name "Disabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+                Set-RegValue -BackupCtx $BackupCtx -Path $k -Name "DisabledByUser" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+            } else {
+                Set-RegValue -BackupCtx $BackupCtx -Path $k -Name "Disabled" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+                Set-RegValue -BackupCtx $BackupCtx -Path $k -Name "DisabledByUser" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+            }
+            $changed++
         }
-        catch {
-            Write-Log -Message "INFO: Scheduled task '$task' not found or couldn't be disabled. $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Gray' -StatusLabel $StatusLabel
+
+        Write-Log -Message ("Background apps updated for {0} Store packages." -f $changed) -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+
+$Script:Tweaks += New-Tweak `
+    -Id "privacy_storagesense" -Name "Disable Storage Sense" -Category "Privacy" `
+    -Description "Turns off Storage Sense for the current user." `
+    -GetState { if (Compare-RegExpected "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" "01" 0) { "Applied" } else { "NotApplied" } } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Disable Storage Sense ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" -Name "01" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+$Script:Tweaks += New-Tweak `
+    -Id "privacy_consumer_ads" `
+    -Name "Disable Ads, Spotlight, Tips, and App Launch Tracking" `
+    -Category "Privacy" `
+    -Risk "Low" `
+    -Description "Turns off Advertising ID usage, tailored experiences, Windows Spotlight/tips, and Start app-launch tracking to reduce personalization and consumer content." `
+    -GetState {
+        $a = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo" "DisabledByGroupPolicy" 1
+        $b = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData" 1
+        $c = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableSoftLanding" 1
+        $d = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 1
+        $e = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableThirdPartySuggestions" 1
+        $f = Compare-RegExpected "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_TrackProgs" 0
+        if ($a -and $b -and $c -and $d -and $e -and $f) { "Applied" }
+        elseif ((-not $a) -and (-not $b) -and (-not $c) -and (-not $d) -and (-not $e) -and (-not $f)) { "NotApplied" }
+        else { "Partial" }
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Disable Ads/Spotlight/Tips ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo" -Name "DisabledByGroupPolicy" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableTailoredExperiencesWithDiagnosticData" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableSoftLanding" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsSpotlightFeatures" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsSpotlightOnLockScreen" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsSpotlightWindowsWelcomeExperience" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableThirdPartySuggestions" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Start_TrackProgs" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+$Script:Tweaks += New-Tweak `
+    -Id "privacy_diagnostics_min" `
+    -Name "Minimize Optional Diagnostics and Personalization Data" `
+    -Category "Privacy" `
+    -Risk "Medium" `
+    -Description "Sets diagnostic data to Required (where supported), disables inking/typing personalization, online speech recognition, and feedback prompts." `
+    -GetState {
+        $a = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" "AllowTelemetry" 1
+        $b = Compare-RegExpected "HKCU:\SOFTWARE\Microsoft\InputPersonalization" "RestrictImplicitTextCollection" 1
+        $c = Compare-RegExpected "HKCU:\SOFTWARE\Microsoft\InputPersonalization" "RestrictImplicitInkCollection" 1
+        $d = Compare-RegExpected "HKCU:\SOFTWARE\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy" "HasAccepted" 0
+        $e = Compare-RegExpected "HKCU:\SOFTWARE\Microsoft\Siuf\Rules" "NumberOfSIUFInPeriod" 0
+        if ($a -and $b -and $c -and $d -and $e) { "Applied" }
+        elseif ((-not $a) -and (-not $b) -and (-not $c) -and (-not $d) -and (-not $e)) { "NotApplied" }
+        else { "Partial" }
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Minimize Optional Diagnostics ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection" -Name "AllowTelemetry" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowDeviceNameInTelemetry" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\SOFTWARE\Microsoft\InputPersonalization" -Name "RestrictImplicitTextCollection" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\SOFTWARE\Microsoft\InputPersonalization" -Name "RestrictImplicitInkCollection" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\SOFTWARE\Microsoft\InputPersonalization\TrainedDataStore" -Name "HarvestContacts" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\SOFTWARE\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy" -Name "HasAccepted" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\SOFTWARE\Microsoft\Siuf\Rules" -Name "NumberOfSIUFInPeriod" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\SOFTWARE\Microsoft\Siuf\Rules" -Name "PeriodInNanoSeconds" -Value 0 -Type QWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "DoNotShowFeedbackNotifications" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+$Script:Tweaks += New-Tweak `
+    -Id "privacy_search" `
+    -Name "Disable Web Search and Search Highlights" `
+    -Category "Privacy" `
+    -Risk "Low" `
+    -Description "Disables Bing/web results in Start/Search and turns off Search highlights." `
+    -GetState {
+        $a = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" "DisableWebSearch" 1
+        $b = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" "ConnectedSearchUseWeb" 0
+        $c = Compare-RegExpected "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 0
+        $d = Compare-RegExpected "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\SearchSettings" "IsDynamicSearchBoxEnabled" 0
+        if ($a -and $b -and $c -and $d) { "Applied" }
+        elseif ((-not $a) -and (-not $b) -and (-not $c) -and (-not $d)) { "NotApplied" }
+        else { "Partial" }
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Disable Web Search & Search Highlights ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" -Name "DisableWebSearch" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" -Name "ConnectedSearchUseWeb" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" -Name "ConnectedSearchUseWebOverMeteredConnections" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Search" -Name "BingSearchEnabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Search" -Name "CortanaConsent" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\SearchSettings" -Name "IsDynamicSearchBoxEnabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+$Script:Tweaks += New-Tweak `
+    -Id "privacy_widgets" `
+    -Name "Disable Widgets (News/Interests Feed)" `
+    -Category "Privacy" `
+    -Risk "Low" `
+    -Description "Disables the Windows 11 Widgets experience (does not change Copilot settings)." `
+    -GetState {
+        $a = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" "AllowNewsAndInterests" 0
+        $b = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Widgets" "AllowWidgets" 0
+        if ($a -and $b) { "Applied" }
+        elseif ((-not $a) -and (-not $b)) { "NotApplied" }
+        else { "Partial" }
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Disable Widgets ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" -Name "AllowNewsAndInterests" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Widgets" -Name "AllowWidgets" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+$Script:Tweaks += New-Tweak `
+    -Id "privacy_location_sensors" `
+    -Name "Disable Location and Sensors" `
+    -Category "Privacy" `
+    -Risk "Medium" `
+    -Description "Disables Windows location services and sensor access by policy (good default for corporate endpoints unless location is required)." `
+    -GetState {
+        $a = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors" "DisableLocation" 1
+        $b = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors" "DisableSensors" 1
+        $c = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" "LetAppsAccessLocation" 2
+        if ($a -and $b -and $c) { "Applied" }
+        elseif ((-not $a) -and (-not $b) -and (-not $c)) { "NotApplied" }
+        else { "Partial" }
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Disable Location & Sensors ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors" -Name "DisableLocation" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors" -Name "DisableWindowsLocationProvider" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors" -Name "DisableSensors" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" -Name "LetAppsAccessLocation" -Value 2 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" -Name "LetAppsAccessMotion" -Value 2 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+$Script:Tweaks += New-Tweak `
+    -Id "privacy_wer_tuning" `
+    -Name "Limit Error Reporting and Use Small Crash Dumps" `
+    -Category "Privacy" `
+    -Risk "Medium" `
+    -Description "Keeps Windows Error Reporting functional but limits additional data and configures small memory dumps for crashes." `
+    -GetState {
+        $a = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting" "DontSendAdditionalData" 1
+        $b = Compare-RegExpected "HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl" "CrashDumpEnabled" 3
+        if ($a -and $b) { "Applied" }
+        elseif ((-not $a) -and (-not $b)) { "NotApplied" }
+        else { "Partial" }
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Tune Error Reporting & Crash Dumps ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting" -Name "Disabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting" -Name "DontSendAdditionalData" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting\Consent" -Name "DefaultConsent" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl" -Name "CrashDumpEnabled" -Value 3 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl" -Name "AlwaysKeepMemoryDump" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl" -Name "LogEvent" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+
+$Script:Tweaks += New-Tweak `
+    -Id "privacy_wifisense" -Name "Disable WiFi Sense" -Category "Privacy" `
+    -Description "Disables WiFi Sense via PolicyManager keys." `
+    -GetState {
+        $a=Compare-RegExpected "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowWiFiHotSpotReporting" "Value" 0
+        $b=Compare-RegExpected "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowAutoConnectToWiFiSenseHotspots" "Value" 0
+        if ($a -and $b) { "Applied" } elseif (-not $a -and -not $b) { "NotApplied" } else { "Partial" }
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Disable WiFi Sense ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowWiFiHotSpotReporting" -Name "Value" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowAutoConnectToWiFiSenseHotspots" -Name "Value" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+$Script:Tweaks += New-Tweak `
+    -Id "privacy_teredo" -Name "Disable Teredo" -Category "Privacy" -Risk "High" `
+    -Description "Disables Teredo and sets DisabledComponents=0x8E. May impact Xbox/VPN/edge networking." `
+    -GetState { if (Compare-RegExpected "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" "DisabledComponents" 0x8e) { "Applied" } else { "NotApplied" } } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Disable Teredo ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        try { & netsh.exe interface teredo set state disabled | Out-Null } catch { }
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" -Name "DisabledComponents" -Value 0x8e -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+$Script:Tweaks += New-Tweak `
+    -Id "privacy_recall" -Name "Disable Recall (Windows 11)" -Category "Privacy" -Risk "Medium" -RequiresReboot $true `
+    -Description "Disables the Recall optional feature (if installed) and applies WindowsAI policy." `
+    -IsAvailable { (Get-OptionalFeatureStateSafe -Name "Recall").Exists } `
+    -GetState {
+        $info=Get-OptionalFeatureStateSafe -Name "Recall"
+        if (-not $info.Exists) { "NotAvailable" }
+        elseif ($info.State -eq "Disabled") { "Applied" }
+        elseif ($info.State -eq "Enabled") { "NotApplied" }
+        else { "Unknown" }
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Disable Recall ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Disable-OptionalFeatureSafe -BackupCtx $BackupCtx -Name "Recall" -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI" -Name "DisableAIDataAnalysis" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Write-Log -Message "Recall disabled. Restart may be required." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+# --- Performance tweaks ---
+$Script:Tweaks += New-Tweak `
+    -Id "perf_temp" -Name "Delete Temporary Files" -Category "Performance" `
+    -Description "Deletes contents of Windows and user temp directories. In-use files may be skipped." `
+    -GetState { "N-A" } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Delete Temporary Files ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        $paths=@("C:\Windows\Temp",$env:TEMP)
+        foreach ($p in $paths) {
+            Write-Log -Message "Cleaning: $p" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
+            try {
+                if (Test-Path -LiteralPath $p) {
+                    Get-ChildItem -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+                }
+            } catch { }
         }
-    }
+        Write-Log -Message "Temp cleanup complete." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "No undo action for temp cleanup." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel }
 
-    # Registry Tweaks
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsConsumerFeatures" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection" -Name "AllowTelemetry" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "ContentDeliveryAllowed" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "OemPreInstalledAppsEnabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowTaskViewButton" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "SystemResponsiveness" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 0xFFFFFFFF -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value 1 -Type String -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKCU:\Control Panel\Desktop" -Name "AutoEndTasks" -Value 1 -Type String -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Write-Log -Message "Telemetry and Consumer Features disabled." -OutputBox $OutputBox -StatusLabel $StatusLabel
-}
+$Script:Tweaks += New-Tweak `
+    -Id "perf_hibernation" -Name "Disable Hibernation" -Category "Performance" -Risk "Medium" `
+    -Description "Disables hibernation and sets HibernateEnabled=0." `
+    -GetState { if (Compare-RegExpected "HKLM:\System\CurrentControlSet\Control\Session Manager\Power" "HibernateEnabled" 0) { "Applied" } else { "NotApplied" } } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Disable Hibernation ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        try { & powercfg.exe -h off | Out-Null } catch { }
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\System\CurrentControlSet\Control\Session Manager\Power" -Name "HibernateEnabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
 
-function Invoke-DisableActivityHistory {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Disabling Activity History ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableActivityFeed" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "PublishUserActivities" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "UploadUserActivities" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Write-Log -Message "Activity History disabled." -OutputBox $OutputBox -StatusLabel $StatusLabel
-}
+$serviceToggles = @(
+    @{ Name="AJRouter"; Startup="Disabled" },
+    @{ Name="ALG"; Startup="Manual" },
+    @{ Name="AppVClient"; Startup="Disabled" },
+    @{ Name="AppXSvc"; Startup="Manual" },
+    @{ Name="AxInstSV"; Startup="Manual" },
+    @{ Name="BITS"; Startup="AutomaticDelayedStart" },
+    @{ Name="Browser"; Startup="Manual" },
+    @{ Name="diagsvc"; Startup="Manual" },
+    @{ Name="DiagTrack"; Startup="Disabled" },
+    @{ Name="dmwappushservice"; Startup="Manual" },
+    @{ Name="Fax"; Startup="Manual" },
+    @{ Name="RemoteRegistry"; Startup="Disabled" },
+    @{ Name="ssh-agent"; Startup="Disabled" },
+    @{ Name="TapiSrv"; Startup="Manual" },
+    @{ Name="tzautoupdate"; Startup="Disabled" },
+    @{ Name="UevAgentService"; Startup="Disabled" },
+    @{ Name="wuauserv"; Startup="Manual" }
+)
 
-function Invoke-DisableGameDVR {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Disabling Game DVR ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKCU:\System\GameConfigStore" -Name "GameDVR_Enabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" -Name "AllowGameDVR" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Write-Log -Message "Game DVR disabled." -OutputBox $OutputBox -StatusLabel $StatusLabel
-}
-
-function Invoke-DisableHibernation {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Disabling Hibernation ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    try {
-        powercfg -h off | Out-Null
-        Set-RegValue -Path "HKLM:\System\CurrentControlSet\Control\Session Manager\Power" -Name "HibernateEnabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-        Write-Log -Message "Hibernation disabled." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
-    } catch {
-        Write-Log -Message "ERROR: Failed to disable hibernation. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
-    }
-}
-
-function Invoke-OptimizeServices {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Optimizing Services ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    $services = @{"AJRouter" = "Disabled"; "ALG" = "Manual"; "AppVClient" = "Disabled"; "AppXSvc" = "Manual"; "AxInstSV" = "Manual"; "BcastDVRUserService_*" = "Manual"; "BITS" = "AutomaticDelayedStart"; "Browser" = "Manual"; "diagsvc" = "Manual"; "DiagTrack" = "Disabled"; "dmwappushservice" = "Manual"; "Fax" = "Manual"; "HomeGroupListener" = "Manual"; "HomeGroupProvider" = "Manual"; "RemoteRegistry" = "Disabled"; "ssh-agent" = "Disabled"; "TapiSrv" = "Manual"; "tzautoupdate" = "Disabled"; "UevAgentService" = "Disabled"; "wuauserv" = "Manual"}
-    foreach ($name in $services.Keys) { Set-ServiceStatus -Name $name -StartupType $services[$name] -OutputBox $OutputBox -StatusLabel $StatusLabel }
-    Write-Log -Message "Service optimization complete." -OutputBox $OutputBox -StatusLabel $StatusLabel
-}
-
-function Invoke-DebloatEdge {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Debloating Microsoft Edge ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "PersonalizationReportingEnabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "ShowRecommendationsEnabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "HideFirstRunExperience" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "EdgeShoppingAssistantEnabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "WebWidgetAllowed" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "CryptoWalletEnabled" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Write-Log -Message "Microsoft Edge debloating complete." -OutputBox $OutputBox -StatusLabel $StatusLabel
-}
-
-function Invoke-DisableTeredo {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Disabling Teredo ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    try {
-        netsh interface teredo set state disabled | Out-Null
-        Set-RegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" -Name "DisabledComponents" -Value 0x8e -OutputBox $OutputBox -StatusLabel $StatusLabel
-        Write-Log -Message "Teredo disabled." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
-    } catch {
-        Write-Log -Message "ERROR: Failed to disable Teredo. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
-    }
-}
-
-function Invoke-DisableBackgroundApps {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Disabling Background Apps ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Write-Log -Message "Background Apps disabled." -OutputBox $OutputBox -StatusLabel $StatusLabel
-}
-
-function Invoke-AdobeDebloat {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Debloating Adobe ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    $adobeServices = @{"AGSService" = "Disabled"; "AGMService" = "Disabled"; "AdobeUpdateService" = "Manual"; "AdobeARMservice" = "Manual"; "CCXProcess" = "Manual"; "CoreSync" = "Manual"}
-    foreach ($name in $adobeServices.Keys) { Set-ServiceStatus -Name $name -StartupType $adobeServices[$name] -OutputBox $OutputBox -StatusLabel $StatusLabel }
-
-    Write-Log -Message "Attempting to rename Adobe Desktop Service..." -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
-    $path = "C:\Program Files (x86)\Common Files\Adobe\Adobe Desktop Common\ADS\Adobe Desktop Service.exe"
-    if (Test-Path $path) {
-        try {
-            Rename-Item -Path $path -NewName "Adobe Desktop Service.exe.old" -Force -ErrorAction Stop
-            Write-Log -Message "Successfully renamed Adobe Desktop Service." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
-        } catch {
-            Write-Log -Message "ERROR: Failed to rename Adobe Desktop Service. Permissions issue or file in use." -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
+$Script:Tweaks += New-Tweak `
+    -Id "perf_services" -Name "Optimize Services" -Category "Performance" -Risk "High" `
+    -Description "Adjusts startup types for a set of services, including Windows Update. Use with care." `
+    -GetState {
+        $total=0; $match=0
+        foreach ($s in $serviceToggles) {
+            $info = Get-ServiceStartupInfo -Name $s.Name
+            if (-not $info.Exists) { continue }
+            $total++
+            if ($info.StartupType -eq $s.Startup) { $match++ }
         }
-    } else {
-        Write-Log -Message "INFO: Adobe Desktop Service not found at default location." -OutputBox $OutputBox -Color 'Gray' -StatusLabel $StatusLabel
-    }
-    Write-Log -Message "Adobe Debloat complete." -OutputBox $OutputBox -StatusLabel $StatusLabel
-}
+        if ($total -eq 0) { "NotAvailable" }
+        elseif ($match -eq 0) { "NotApplied" }
+        elseif ($match -eq $total) { "Applied" }
+        else { "Partial" }
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Optimize Services ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        foreach ($s in $serviceToggles) {
+            try { Set-ServiceStartup -BackupCtx $BackupCtx -Name $s.Name -StartupType $s.Startup -OutputBox $OutputBox -StatusLabel $StatusLabel }
+            catch { Write-Log -Message "Service change failed (non-fatal): $($s.Name) -> $($_.Exception.Message)" -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel }
+        }
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
 
-function Invoke-DisableRecall {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Disabling Windows Recall Feature ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    try {
-        Set-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI" -Name "DisableAIDataAnalysis" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
-        Write-Log -Message "Executing DISM to disable Recall feature. This may take a moment..." -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
-        $process = Start-Process "DISM.exe" -ArgumentList "/Online /Disable-Feature /FeatureName:Recall" -Wait -PassThru -NoNewWindow
-        if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) { # 3010 means success, restart required
-            Write-Log -Message "Successfully disabled Windows Recall feature. A restart may be required." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
+$Script:Tweaks += New-Tweak `
+    -Id "perf_network" -Name "Network Optimizations" -Category "Performance" -Risk "Low" `
+    -Description "Sets TcpNoDelay for TCP parameters and interfaces; flushes DNS cache." `
+    -GetState {
+        $a = Compare-RegExpected "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" "TcpNoDelay" 1
+        if ($a) { "Applied" } else { "NotApplied" }
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Network Optimizations ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "TcpNoDelay" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+
+        $ifRoot="HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+        if (Test-Path -LiteralPath $ifRoot) {
+            Get-ChildItem -Path $ifRoot -ErrorAction SilentlyContinue | ForEach-Object {
+                try { Set-RegValue -BackupCtx $BackupCtx -Path $_.PSPath -Name "TcpNoDelay" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel } catch { }
+            }
+        }
+
+        try { & ipconfig.exe /flushdns | Out-Null } catch { }
+        Write-Log -Message "Network tweaks applied." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+# --- Debloat tweaks ---
+$Script:Tweaks += New-Tweak `
+    -Id "debloat_edge" -Name "Debloat Microsoft Edge" -Category "Debloat" -Risk "Low" `
+    -Description "Applies Edge policies to disable non-essential features (shopping, widgets, reporting, crypto wallet)." `
+    -GetState { if (Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Edge" "HideFirstRunExperience" 1) { "Applied" } else { "NotApplied" } } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Debloat Edge ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        $p="HKLM:\SOFTWARE\Policies\Microsoft\Edge"
+        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "PersonalizationReportingEnabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "ShowRecommendationsEnabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "HideFirstRunExperience" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "EdgeShoppingAssistantEnabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "WebWidgetAllowed" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "CryptoWalletEnabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+$Script:Tweaks += New-Tweak `
+    -Id "debloat_adobe_services" -Name "Adobe Debloat (Services)" -Category "Debloat" -Risk "High" `
+    -Description "Adjusts startup types for selected Adobe services (safer than binary modifications)." `
+    -GetState { "Unknown" } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Adobe Debloat (Services) ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        $adobe=@(
+            @{ Name="AGSService"; Startup="Disabled" },
+            @{ Name="AGMService"; Startup="Disabled" },
+            @{ Name="AdobeUpdateService"; Startup="Manual" },
+            @{ Name="AdobeARMservice"; Startup="Manual" }
+        )
+        foreach ($s in $adobe) {
+            try { Set-ServiceStartup -BackupCtx $BackupCtx -Name $s.Name -StartupType $s.Startup -OutputBox $OutputBox -StatusLabel $StatusLabel }
+            catch { Write-Log -Message "Adobe service tweak failed (non-fatal): $($s.Name) -> $($_.Exception.Message)" -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel }
+        }
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+$Script:Tweaks += New-Tweak `
+    -Id "debloat_adobe_aggressive" -Name "Adobe Debloat (Aggressive: Rename ADS Binary)" -Category "Debloat" -Risk "High" `
+    -Description "Renames Adobe Desktop Service.exe to .old (high impact). Intended only for controlled test cases; rollback supported via Undo Last Run." `
+    -GetState {
+        $orig="C:\Program Files (x86)\Common Files\Adobe\Adobe Desktop Common\ADS\Adobe Desktop Service.exe"
+        $bak="$orig.old"
+        if ((Test-Path -LiteralPath $bak) -and (-not (Test-Path -LiteralPath $orig))) { "Applied" }
+        elseif (Test-Path -LiteralPath $orig) { "NotApplied" }
+        else { "Unknown" }
+    } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Adobe Debloat (Aggressive) ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        $orig="C:\Program Files (x86)\Common Files\Adobe\Adobe Desktop Common\ADS\Adobe Desktop Service.exe"
+        $bak="$orig.old"
+        Backup-FileRename -Ctx $BackupCtx -OriginalPath $orig -BackupPath $bak
+        if (Test-Path -LiteralPath $orig) {
+            try {
+                Rename-Item -LiteralPath $orig -NewName (Split-Path -Leaf $bak) -Force -ErrorAction Stop
+                Write-Log -Message "Renamed: Adobe Desktop Service.exe -> .old" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+            } catch {
+                throw "Rename failed: $($_.Exception.Message)"
+            }
         } else {
-            Write-Log -Message "ERROR: DISM failed to disable Recall. Exit code: $($process.ExitCode)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
+            Write-Log -Message "Original binary not found; nothing to rename." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
         }
-    } catch {
-        Write-Log -Message "ERROR: An exception occurred while disabling Recall. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
-    }
-}
+    } `
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
 
-function Invoke-DisableStorageSense {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Disabling Storage Sense ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" -Name "01" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Write-Log -Message "Storage Sense disabled." -OutputBox $OutputBox -StatusLabel $StatusLabel
-}
-
-function Invoke-DisableWifiSense {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Disabling WiFi Sense ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowWiFiHotSpotReporting" -Name "Value" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Set-RegValue -Path "HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowAutoConnectToWiFiSenseHotspots" -Name "Value" -Value 0 -OutputBox $OutputBox -StatusLabel $StatusLabel
-    Write-Log -Message "WiFi Sense disabled." -OutputBox $OutputBox -StatusLabel $StatusLabel
-}
-
+#------------------------------------------------------------------------------------------------
+# 9) External Tool: O&O ShutUp10++ (signature validated)
+#------------------------------------------------------------------------------------------------
 function Invoke-OOSU10 {
-    param($OutputBox, $StatusLabel)
-    $url = "https://dl5.oo-software.com/files/ooshutup10/OOSU10.exe"
-    $dest = Join-Path $env:TEMP "OOSU10.exe"
-    
-    Write-Log -Message "--- Launching O&O ShutUp10++ ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
-    Write-Log -Message "Downloading from $url..." -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
-    
-    try {
-        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
-        Write-Log -Message "Download complete. Launching application..." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
-        Start-Process -FilePath $dest
-    } catch {
-        Write-Log -Message "ERROR: Failed to download O&O ShutUp10++. Please check your internet connection." -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
-        Write-Log -Message "Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
-    }
+    param([System.Windows.Forms.RichTextBox]$OutputBox,[System.Windows.Forms.ToolStripStatusLabel]$StatusLabel)
+    $url="https://dl5.oo-software.com/files/ooshutup10/OOSU10.exe"
+    $dest=Join-Path $env:TEMP "OOSU10.exe"
+
+    Write-Log -Message "Downloading O&O ShutUp10++..." -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { }
+    Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+    $sig = Get-AuthenticodeSignature -FilePath $dest
+    if ($sig.Status -ne "Valid") { throw "Signature validation failed ($($sig.Status)). Execution blocked." }
+    Write-Log -Message "Signature valid. Launching OOSU10.exe" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    Start-Process -FilePath $dest
 }
 
-# --- NEW Tweak Function: Network Optimizations ---
-function Invoke-NetworkOptimizations {
-    param($OutputBox, $StatusLabel)
-    Write-Log -Message "--- Applying Network Optimizations ---" -OutputBox $OutputBox -Color 'Gold' -StatusLabel $StatusLabel
+#------------------------------------------------------------------------------------------------
+# 10) GUI Construction
+#------------------------------------------------------------------------------------------------
 
-    # Disable Nagle's Algorithm (can reduce latency for some applications, especially games)
-    # This affects TCP connections and can sometimes cause issues with older applications.
-    # It's typically applied per network adapter or globally.
-    # For simplicity, we'll apply it to the default TCP parameters.
-    $tcpip_params_path = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
-    $interfaces_path = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
 
-    Write-Log -Message "Disabling Nagle's Algorithm (TcpNoDelay)..." -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
-    Set-RegValue -Path $tcpip_params_path -Name "TcpNoDelay" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
+# --- Maintenance tweaks (actions) ---
+# These are operational maintenance tasks. Most are not "stateful" and may not be reversible.
+$Script:Tweaks += New-Tweak `
+    -Id "maint_dism_restorehealth" `
+    -Name "DISM: Restore Component Store Health" `
+    -Category "Maintenance" `
+    -Description "Runs DISM /Online /Cleanup-Image /RestoreHealth. Useful for component store corruption and servicing issues. (May take 10-30+ minutes.)" `
+    -Risk "Low" `
+    -GetState { "N-A" } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- DISM RestoreHealth ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        $code = Invoke-ProcessLogged -FilePath "DISM.exe" -Arguments "/Online /Cleanup-Image /RestoreHealth" -Title "DISM RestoreHealth" -OutputBox $OutputBox -StatusLabel $StatusLabel
+        if ($code -ne 0 -and $code -ne 3010) { throw "DISM RestoreHealth returned exit code $code." }
+        if ($code -eq 3010) { Write-Log -Message "DISM indicates a reboot is required." -OutputBox $OutputBox -Color Khaki -StatusLabel $StatusLabel }
+    } `
+    -Undo {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "DISM RestoreHealth has no undo operation." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+    }
 
-    # Apply TcpNoDelay to all network interfaces (more robust)
-    try {
-        Get-ChildItem -Path $interfaces_path | ForEach-Object {
-            $interfacePath = $_.PSPath
-            Write-Log -Message "Setting TcpNoDelay for interface: $($_.Name)" -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
-            Set-RegValue -Path $interfacePath -Name "TcpNoDelay" -Value 1 -OutputBox $OutputBox -StatusLabel $StatusLabel
+$Script:Tweaks += New-Tweak `
+    -Id "maint_sfc_scannow" `
+    -Name "SFC: System File Checker Scan" `
+    -Category "Maintenance" `
+    -Description "Runs sfc /scannow to verify and repair protected Windows system files. (May take 10-30+ minutes.)" `
+    -Risk "Low" `
+    -GetState { "N-A" } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- SFC /scannow ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        $code = Invoke-ProcessLogged -FilePath "sfc.exe" -Arguments "/scannow" -Title "SFC Scan" -OutputBox $OutputBox -StatusLabel $StatusLabel
+        if ($code -ne 0) { throw "SFC returned exit code $code." }
+    } `
+    -Undo {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "SFC repair actions are not reversible via this tool." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+    }
+
+$Script:Tweaks += New-Tweak `
+    -Id "maint_reset_wu" `
+    -Name "Reset Windows Update Components" `
+    -Category "Maintenance" `
+    -Description "Stops update services, clears SoftwareDistribution and catroot2 caches (via rename), and restarts services. Useful for stuck updates. Reversible via Undo Last Run." `
+    -Risk "Medium" `
+    -GetState { "N-A" } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Reset Windows Update Components ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+
+        $services = @("bits","wuauserv","cryptsvc","msiserver")
+        foreach ($s in $services) {
+            try {
+                Write-Log -Message "Stopping service: $s" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+                Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
+            } catch { }
         }
-    } catch {
-        Write-Log -Message "WARNING: Could not apply TcpNoDelay to all interfaces. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Orange' -StatusLabel $StatusLabel
+
+        $ts = (Get-Date).ToString("yyyyMMdd_HHmmss")
+        $sd = Join-Path $env:SystemRoot "SoftwareDistribution"
+        $sdBak = "${sd}.bak_$ts"
+        if (Test-Path -LiteralPath $sd) {
+            Backup-FileRename -Ctx $BackupCtx -OriginalPath $sd -BackupPath $sdBak
+            try {
+                Rename-Item -LiteralPath $sd -NewName ([IO.Path]::GetFileName($sdBak)) -ErrorAction Stop
+                Write-Log -Message "Renamed SoftwareDistribution -> $([IO.Path]::GetFileName($sdBak))" -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel
+            } catch {
+                Write-Log -Message "Failed to rename SoftwareDistribution. $($_.Exception.Message)" -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel
+                throw
+            }
+        }
+
+        $cr = Join-Path $env:SystemRoot "System32\catroot2"
+        $crBak = "${cr}.bak_$ts"
+        if (Test-Path -LiteralPath $cr) {
+            Backup-FileRename -Ctx $BackupCtx -OriginalPath $cr -BackupPath $crBak
+            try {
+                Rename-Item -LiteralPath $cr -NewName ([IO.Path]::GetFileName($crBak)) -ErrorAction Stop
+                Write-Log -Message "Renamed catroot2 -> $([IO.Path]::GetFileName($crBak))" -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel
+            } catch {
+                Write-Log -Message "Failed to rename catroot2. $($_.Exception.Message)" -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel
+                throw
+            }
+        }
+
+        foreach ($s in $services) {
+            try {
+                Write-Log -Message "Starting service: $s" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+                Start-Service -Name $s -ErrorAction SilentlyContinue
+            } catch { }
+        }
+
+        Write-Log -Message "Windows Update component reset complete." -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel
+    } `
+    -Undo {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "Use Undo Last Run to restore SoftwareDistribution/catroot2 if needed." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
     }
 
-    # Flush DNS Resolver Cache
-    Write-Log -Message "Flushing DNS Resolver Cache..." -OutputBox $OutputBox -Color 'Cyan' -StatusLabel $StatusLabel
-    try {
-        ipconfig /flushdns | Out-Null
-        Write-Log -Message "DNS Resolver Cache flushed." -OutputBox $OutputBox -Color 'LimeGreen' -StatusLabel $StatusLabel
-    } catch {
-        Write-Log -Message "ERROR: Failed to flush DNS cache. Details: $($_.Exception.Message)" -OutputBox $OutputBox -Color 'Red' -StatusLabel $StatusLabel
+$Script:Tweaks += New-Tweak `
+    -Id "maint_clear_teams_cache" `
+    -Name "Clear Microsoft Teams Cache" `
+    -Category "Maintenance" `
+    -Description "Stops Teams (classic/new where detected) and clears cache folders for the current user. Not reversible." `
+    -Risk "Medium" `
+    -GetState { "N-A" } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Clear Teams Cache ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        $procNames = @("Teams","ms-teams","Update","TeamsUpdater")
+        foreach ($p in $procNames) {
+            try { Stop-Process -Name $p -Force -ErrorAction SilentlyContinue } catch { }
+        }
+
+        $paths = @()
+
+        # Classic Teams
+        $paths += (Join-Path $env:APPDATA "Microsoft\Teams")
+
+        # New Teams (MSIX) common cache locations
+        $paths += (Join-Path $env:LOCALAPPDATA "Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams")
+        $paths += (Join-Path $env:LOCALAPPDATA "Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Roaming\Microsoft\Teams")
+
+        $targets = @("application cache","blob_storage","Cache","Code Cache","databases","GPUCache","IndexedDB","Local Storage","tmp","Logs")
+        foreach ($root in $paths | Where-Object { $_ -and (Test-Path -LiteralPath $_) }) {
+            foreach ($t in $targets) {
+                $p = Join-Path $root $t
+                if (Test-Path -LiteralPath $p) {
+                    try {
+                        Write-Log -Message "Clearing: $p" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+                        Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+                    } catch { }
+                }
+            }
+        }
+
+        Write-Log -Message "Teams cache cleared. Start Teams again to rebuild cache." -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel
+    } `
+    -Undo {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "Teams cache clearing is not reversible." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
     }
 
-    Write-Log -Message "Network optimizations complete." -OutputBox $OutputBox -StatusLabel $StatusLabel
+$Script:Tweaks += New-Tweak `
+    -Id "maint_clear_outlook_temp" `
+    -Name "Clear Outlook Secure Temp Attachments" `
+    -Category "Maintenance" `
+    -Description "Clears OutlookSecureTempFolder and common Content.Outlook cache paths for the current user. Not reversible." `
+    -Risk "Medium" `
+    -GetState { "N-A" } `
+    -Apply {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "--- Clear Outlook Temp Attachments ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+
+        # Try Office versions in descending order
+        $versions = @("16.0","15.0","14.0")
+        $folders = @()
+
+        foreach ($v in $versions) {
+            $key = "HKCU:\Software\Microsoft\Office\$v\Outlook\Security"
+            try {
+                $info = Get-RegValueInfo -Path $key -Name "OutlookSecureTempFolder"
+                if ($info.ExistsValue -and $info.Value) { $folders += [string]$info.Value }
+            } catch { }
+        }
+
+        # Common fallback
+        $folders += (Join-Path $env:LOCALAPPDATA "Microsoft\Windows\INetCache\Content.Outlook")
+
+        $folders = $folders | Where-Object { $_ -and $_.Trim().Length -gt 0 } | Select-Object -Unique
+
+        foreach ($f in $folders) {
+            if (Test-Path -LiteralPath $f) {
+                try {
+                    Write-Log -Message "Clearing: $f" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+                    Get-ChildItem -LiteralPath $f -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                    try { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+                }
+                } catch { }
+            }
+        }
+
+        Write-Log -Message "Outlook temp attachment cache cleared." -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel
+    } `
+    -Undo {
+        param($BackupCtx,$OutputBox,$StatusLabel)
+        Write-Log -Message "Outlook temp cache clearing is not reversible." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+    }
+
+$mainForm = New-Object System.Windows.Forms.Form
+$mainForm.Text = "$($Script:AppName) v$($Script:AppVersion)"
+$mainForm.StartPosition = "CenterScreen"
+$mainForm.Size = New-Object System.Drawing.Size -ArgumentList 740, 860
+$mainForm.FormBorderStyle = 'FixedSingle'
+$mainForm.MaximizeBox = $false
+$mainForm.BackColor = [System.Drawing.Color]::FromArgb(45,45,48)
+$mainForm.ForeColor = [System.Drawing.Color]::White
+
+$toolTip = New-Object System.Windows.Forms.ToolTip
+$toolTip.AutoPopDelay = 20000
+$toolTip.InitialDelay = 400
+$toolTip.ReshowDelay  = 100
+
+$tabs = New-Object System.Windows.Forms.TabControl
+$tabs.Location = New-Object System.Drawing.Point -ArgumentList 15, 15
+$tabs.Size = New-Object System.Drawing.Size -ArgumentList 695, 380
+
+function New-Tab {
+    param([string]$Text)
+    $t = New-Object System.Windows.Forms.TabPage
+    $t.Text = $Text
+    $t.BackColor = [System.Drawing.Color]::FromArgb(45,45,48)
+    $t.ForeColor = [System.Drawing.Color]::White
+    return $t
 }
 
+$tabPrivacy = New-Tab "Privacy"
+$tabPerformance = New-Tab "Performance"
+$tabDebloat = New-Tab "Debloat"
+$tabMaintenance = New-Tab "Maintenance"
+$tabTools = New-Tab "External Tools"
 
-#================================================================================================
-# 3. GUI CREATION
-# This section defines all the visual elements of the application window.
-#================================================================================================
+[void]$tabs.TabPages.Add($tabPrivacy)
+[void]$tabs.TabPages.Add($tabPerformance)
+[void]$tabs.TabPages.Add($tabDebloat)
+[void]$tabs.TabPages.Add($tabMaintenance)
+[void]$tabs.TabPages.Add($tabTools)
 
-$main_form = New-Object System.Windows.Forms.Form
-$main_form.Text = "Windows Optimization Tool v1.7"
-$main_form.Size = New-Object System.Drawing.Size(600, 740) # Adjusted for single column
-$main_form.StartPosition = "CenterScreen"
-$main_form.FormBorderStyle = 'FixedSingle'
-$main_form.MaximizeBox = $false
-$main_form.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
-$main_form.ForeColor = [System.Drawing.Color]::White
+$Script:CheckBoxes = @{}
+$Script:StateLabels = @{}
 
-# --- Create Font objects ---
-$font = New-Object System.Drawing.Font("Segoe UI", 10)
-$titleFont = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+function Add-TweaksToTab {
+    param([System.Windows.Forms.TabPage]$Tab,[string]$Category)
+    $y = 15
+    foreach ($t in $Script:Tweaks | Where-Object { $_.Category -eq $Category }) {
+        $cb = New-Object System.Windows.Forms.CheckBox
+        $cb.Text = $t.Name
+        $cb.Location = New-Object System.Drawing.Point -ArgumentList 15, $y
+        $cb.Size = New-Object System.Drawing.Size -ArgumentList 495, 22
+        $cb.ForeColor = [System.Drawing.Color]::White
+        $cb.BackColor = $Tab.BackColor
 
-# --- Create TabControl ---
-$tab_control = New-Object System.Windows.Forms.TabControl
-$tab_control.Location = New-Object System.Drawing.Point(20, 20)
-$tab_control.Size = New-Object System.Drawing.Size(545, 490) # Adjusted size for tabs
-$tab_control.Font = $font
-$tab_control.ForeColor = [System.Drawing.Color]::White
-$tab_control.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30) # Darker background for tabs
-$main_form.Controls.Add($tab_control)
+        $lbl = New-Object System.Windows.Forms.Label
+        $lbl.Location = New-Object System.Drawing.Point -ArgumentList 530, ($y+2)
+        $lbl.Size = New-Object System.Drawing.Size -ArgumentList 145, 20
+        $lbl.ForeColor = [System.Drawing.Color]::Silver
+        $lbl.TextAlign = 'MiddleRight'
 
-# --- Define Tweak Categories for Tabs ---
-$tweak_categories_privacy = @(
-    "Disable Telemetry & Consumer Features",
-    "Disable Activity History",
-    "Disable Game DVR",
-    "Disable Storage Sense",
-    "Disable WiFi Sense",
-    "Disable Recall (Windows 11)"
-)
+        $toolTip.SetToolTip($cb, "$($t.Description)`r`nRisk: $($t.Risk)$(if($t.RequiresReboot){' | Reboot: Yes'}else{' | Reboot: No'})")
 
-$tweak_categories_performance = @(
-    "Delete Temporary Files",
-    "Disable Hibernation",
-    "Optimize Services",
-    "Disable Teredo",
-    "Disable Background Apps",
-    "Network Optimizations" # NEW: Added Network Optimizations
-)
+        $Script:CheckBoxes[$t.Id] = $cb
+        $Script:StateLabels[$t.Id] = $lbl
 
-$tweak_categories_debloat = @(
-    "Debloat Microsoft Edge",
-    "Adobe Debloat"
-)
-
-# --- Create TabPages and add checkboxes ---
-$checkboxes = @{} # This will store all checkboxes across all tabs
-
-# Privacy Tab
-$tab_privacy = New-Object System.Windows.Forms.TabPage "Privacy"
-$tab_privacy.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
-$tab_control.Controls.Add($tab_privacy)
-$y_pos_privacy = 20
-foreach ($category in $tweak_categories_privacy) {
-    $checkbox = New-Object System.Windows.Forms.CheckBox
-    $checkbox.Location = New-Object System.Drawing.Point(20, $y_pos_privacy)
-    $checkbox.Size = New-Object System.Drawing.Size(500, 30)
-    $checkbox.Text = $category
-    $checkbox.Font = $font
-    $checkbox.ForeColor = [System.Drawing.Color]::White
-    $tab_privacy.Controls.Add($checkbox)
-    $checkboxes[$category] = $checkbox
-    $y_pos_privacy += 35
-}
-
-# Performance Tab
-$tab_performance = New-Object System.Windows.Forms.TabPage "Performance"
-$tab_performance.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
-$tab_control.Controls.Add($tab_performance)
-$y_pos_performance = 20
-foreach ($category in $tweak_categories_performance) {
-    $checkbox = New-Object System.Windows.Forms.CheckBox
-    $checkbox.Location = New-Object System.Drawing.Point(20, $y_pos_performance)
-    $checkbox.Size = New-Object System.Drawing.Size(500, 30)
-    $checkbox.Text = $category
-    $checkbox.Font = $font
-    $checkbox.ForeColor = [System.Drawing.Color]::White
-    $tab_performance.Controls.Add($checkbox)
-    $checkboxes[$category] = $checkbox
-    $y_pos_performance += 35
-}
-
-# Debloat Tab
-$tab_debloat = New-Object System.Windows.Forms.TabPage "Debloat"
-$tab_debloat.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
-$tab_control.Controls.Add($tab_debloat)
-$y_pos_debloat = 20
-foreach ($category in $tweak_categories_debloat) {
-    $checkbox = New-Object System.Windows.Forms.CheckBox
-    $checkbox.Location = New-Object System.Drawing.Point(20, $y_pos_debloat)
-    $checkbox.Size = New-Object System.Drawing.Size(500, 30)
-    $checkbox.Text = $category
-    $checkbox.Font = $font
-    $checkbox.ForeColor = [System.Drawing.Color]::White
-    $tab_debloat.Controls.Add($checkbox)
-    $checkboxes[$category] = $checkbox
-    $y_pos_debloat += 35
-}
-
-# External Tools Tab (for O&O ShutUp10++)
-$tab_externaltools = New-Object System.Windows.Forms.TabPage "External Tools"
-$tab_externaltools.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
-$tab_control.Controls.Add($tab_externaltools)
-
-# Add the O&O ShutUp10++ button directly to this tab
-$btn_oosu10_tab = New-Object System.Windows.Forms.Button
-$btn_oosu10_tab.Location = New-Object System.Drawing.Point(20, 20) # Position within the tab
-$btn_oosu10_tab.Size = New-Object System.Drawing.Size(200, 40)
-$btn_oosu10_tab.Text = "Launch O&O ShutUp10++"
-$btn_oosu10_tab.Font = $font
-$btn_oosu10_tab.BackColor = [System.Drawing.Color]::FromArgb(107, 33, 107) # Distinct color
-$btn_oosu10_tab.FlatStyle = 'Flat'
-$btn_oosu10_tab.FlatAppearance.BorderSize = 0
-$tab_externaltools.Controls.Add($btn_oosu10_tab)
-
-# Link the button on the tab to the existing OOSU10 function
-$btn_oosu10_tab.Add_Click({
-    Invoke-OOSU10 -OutputBox $output_box -StatusLabel $status_label # Pass status label
-})
-
-# --- Create ToolTip object and assign tooltips to checkboxes ---
-$tooltip = New-Object System.Windows.Forms.ToolTip
-$tooltip.AutoPopDelay = 5000 # Time the tooltip remains visible (5 seconds)
-$tooltip.InitialDelay = 500 # Time before tooltip appears (0.5 seconds)
-$tooltip.ReshowDelay = 100 # Time to wait before showing subsequent tooltips
-
-# Loop through all checkboxes and set their tooltips
-foreach ($category in $checkboxes.Keys) {
-    $checkbox = $checkboxes[$category]
-    switch ($category) {
-        "Delete Temporary Files" { $tooltip.SetToolTip($checkbox, "Removes temporary system and user files to free up disk space. This action is irreversible.") }
-        "Disable Hibernation" { $tooltip.SetToolTip($checkbox, "Disables the hibernation feature (hiberfil.sys), freeing up significant disk space. You will no longer have the 'Hibernate' power option.") }
-        "Optimize Services" { $tooltip.SetToolTip($checkbox, "Adjusts the startup type of various non-essential Windows services to 'Manual' or 'Disabled' to improve system performance.") }
-        "Disable Telemetry & Consumer Features" { $tooltip.SetToolTip($checkbox, "Reduces data collection by Microsoft and disables consumer-oriented features like suggested apps and ads.") }
-        "Disable Activity History" { $tooltip.SetToolTip($checkbox, "Prevents Windows from collecting and syncing your activity history across devices.") }
-        "Disable Game DVR" { $tooltip.SetToolTip($checkbox, "Disables the Xbox Game Bar's background recording and screenshot features, which can consume system resources.") }
-        "Disable Background Apps" { $tooltip.SetToolTip($checkbox, "Prevents Universal Windows Platform (UWP) apps from running in the background when not actively in use.") }
-        "Disable Storage Sense" { $tooltip.SetToolTip($checkbox, "Turns off Storage Sense, Windows' automatic disk cleanup feature.") }
-        "Disable WiFi Sense" { $tooltip.SetToolTip($checkbox, "Disables features that automatically connect to open Wi-Fi hotspots and share Wi-Fi network credentials.") }
-        "Disable Teredo" { $tooltip.SetToolTip($checkbox, "Disables the Teredo tunneling interface, which is primarily used for IPv6 connectivity over IPv4 networks. Can improve network performance in some cases.") }
-        "Disable Recall (Windows 11)" { $tooltip.SetToolTip($checkbox, "Disables the Windows Recall feature, which captures screenshots of your activity. This requires a system restart to take full effect.") }
-        "Debloat Microsoft Edge" { $tooltip.SetToolTip($checkbox, "Applies registry tweaks to disable various non-essential features and reporting in Microsoft Edge.") }
-        "Adobe Debloat" { $tooltip.SetToolTip($checkbox, "Attempts to disable or rename non-essential Adobe background services and processes.") }
-        "Network Optimizations" { $tooltip.SetToolTip($checkbox, "Optimizes network settings by disabling Nagle's algorithm (TcpNoDelay) and flushing the DNS cache, which can reduce latency.") } # NEW: Tooltip for Network Optimizations
-        default { $tooltip.SetToolTip($checkbox, "No detailed information available for this tweak.") }
+        [void]$Tab.Controls.Add($cb)
+        [void]$Tab.Controls.Add($lbl)
+        $y += 28
     }
 }
 
-# --- Create Buttons (adjust positions for tabs) ---
-$btn_apply = New-Object System.Windows.Forms.Button
-$btn_apply.Location = New-Object System.Drawing.Point(405, 535) # Adjusted position
-$btn_apply.Size = New-Object System.Drawing.Size(160, 40) # Adjusted size
-$btn_apply.Text = "Apply Selected Tweaks"
-$btn_apply.Font = $font
-$btn_apply.BackColor = [System.Drawing.Color]::FromArgb(0, 122, 204)
-$btn_apply.FlatStyle = 'Flat'
-$btn_apply.FlatAppearance.BorderSize = 0
-$main_form.Controls.Add($btn_apply)
+Add-TweaksToTab -Tab $tabPrivacy -Category "Privacy"
+Add-TweaksToTab -Tab $tabPerformance -Category "Performance"
+Add-TweaksToTab -Tab $tabDebloat -Category "Debloat"
+Add-TweaksToTab -Tab $tabMaintenance -Category "Maintenance"
 
-$btn_select_all = New-Object System.Windows.Forms.Button
-$btn_select_all.Location = New-Object System.Drawing.Point(20, 535)
-$btn_select_all.Size = New-Object System.Drawing.Size(90, 40) # Adjusted size
-$btn_select_all.Text = "Select All"
-$btn_select_all.Font = $font
-$btn_select_all.BackColor = [System.Drawing.Color]::FromArgb(63, 63, 70)
-$btn_select_all.FlatStyle = 'Flat'
-$btn_select_all.FlatAppearance.BorderSize = 0
-$main_form.Controls.Add($btn_select_all)
+# Tools tab content
+$btnOosu = New-Object System.Windows.Forms.Button
+$btnOosu.Text = "Download && Launch O&O ShutUp10++"
+$btnOosu.Location = New-Object System.Drawing.Point -ArgumentList 15, 20
+$btnOosu.Size = New-Object System.Drawing.Size -ArgumentList 655, 40
+$btnOosu.BackColor = [System.Drawing.Color]::FromArgb(63,63,70)
+$btnOosu.ForeColor = [System.Drawing.Color]::White
+$toolTip.SetToolTip($btnOosu, "Downloads OOSU10.exe and validates its Authenticode signature before launching.")
+[void]$tabTools.Controls.Add($btnOosu)
 
-$btn_deselect_all = New-Object System.Windows.Forms.Button
-$btn_deselect_all.Location = New-Object System.Drawing.Point(120, 535) # Adjusted position
-$btn_deselect_all.Size = New-Object System.Drawing.Size(90, 40) # Adjusted size
-$btn_deselect_all.Text = "Deselect All"
-$btn_deselect_all.Font = $font
-$btn_deselect_all.BackColor = [System.Drawing.Color]::FromArgb(63, 63, 70)
-$btn_deselect_all.FlatStyle = 'Flat'
-$btn_deselect_all.FlatAppearance.BorderSize = 0
-$main_form.Controls.Add($btn_deselect_all)
+# Options: Restore point
+$cbRestorePoint = New-Object System.Windows.Forms.CheckBox
+$cbRestorePoint.Text = "Create a System Restore Point before applying (if available)"
+$cbRestorePoint.Location = New-Object System.Drawing.Point -ArgumentList 15, 405
+$cbRestorePoint.Size = New-Object System.Drawing.Size -ArgumentList 520, 22
+$cbRestorePoint.ForeColor = [System.Drawing.Color]::White
+$cbRestorePoint.BackColor = $mainForm.BackColor
+$cbRestorePoint.Checked = $false
+$toolTip.SetToolTip($cbRestorePoint, "Attempts Checkpoint-Computer (may fail if System Restore is disabled).")
 
-# --- Output Log Textbox ---
-$output_box = New-Object System.Windows.Forms.RichTextBox
-$output_box.Location = New-Object System.Drawing.Point(20, 590)
-$output_box.Size = New-Object System.Drawing.Size(545, 100)
-$output_box.Font = New-Object System.Drawing.Font("Consolas", 9)
-$output_box.ReadOnly = $true
-$output_box.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
-$output_box.ForeColor = [System.Drawing.Color]::White
-$output_box.BorderStyle = 'FixedSingle'
-$main_form.Controls.Add($output_box)
+# Buttons
+function New-Button($text,$x,$y,$w,$h,$rgb) {
+    $b = New-Object System.Windows.Forms.Button
+    $b.Text = $text
+    $b.Location = New-Object System.Drawing.Point -ArgumentList $x,$y
+    $b.Size = New-Object System.Drawing.Size -ArgumentList $w,$h
+    $b.BackColor = [System.Drawing.Color]::FromArgb($rgb[0],$rgb[1],$rgb[2])
+    $b.ForeColor = [System.Drawing.Color]::White
+    return $b
+}
 
-# --- Status Bar ---
-$status_strip = New-Object System.Windows.Forms.StatusStrip
-$status_strip.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30) # Match background
-$status_strip.ForeColor = [System.Drawing.Color]::White
-$main_form.Controls.Add($status_strip)
+$btnSelectAll    = New-Button "Select All"     15  433 110 36 @(63,63,70)
+$btnDeselectAll  = New-Button "Deselect All"   135 433 110 36 @(63,63,70)
+$btnRecommended  = New-Button "Recommended"    255 433 110 36 @(63,63,70)
+$btnRefresh      = New-Button "Refresh State"  375 433 110 36 @(63,63,70)
+$btnApply        = New-Button "Apply Selected" 495 433 215 36 @(0,122,204)
+$btnUndoLast     = New-Button "Undo Last Run"  495 475 215 36 @(104,33,122)
+$btnCancel       = New-Button "Cancel"         375 475 110 36 @(63,63,70)
+$btnCancel.Enabled = $false
 
-$status_label = New-Object System.Windows.Forms.ToolStripStatusLabel
-$status_label.Text = "Ready. Select tweaks and click 'Apply'."
-$status_label.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-$status_label.ForeColor = [System.Drawing.Color]::White
-$status_strip.Items.Add($status_label)
+$progress = New-Object System.Windows.Forms.ProgressBar
+$progress.Location = New-Object System.Drawing.Point -ArgumentList 15, 483
+$progress.Size = New-Object System.Drawing.Size -ArgumentList 350, 20
+$progress.Minimum = 0
+$progress.Maximum = 100
+$progress.Value = 0
 
-# Initial log message (now also updates status bar)
-Write-Log -Message "Ready. Select tweaks and click 'Apply'." -OutputBox $output_box -StatusLabel $status_label
+$outputBox = New-Object System.Windows.Forms.RichTextBox
+$outputBox.Location = New-Object System.Drawing.Point -ArgumentList 15, 515
+$outputBox.Size = New-Object System.Drawing.Size -ArgumentList 695, 285
+$outputBox.ReadOnly = $true
+$outputBox.BackColor = [System.Drawing.Color]::FromArgb(30,30,30)
+$outputBox.ForeColor = [System.Drawing.Color]::White
+$outputBox.Font = New-Object System.Drawing.Font("Consolas", 9)
 
-#================================================================================================
-# 4. EVENT HANDLERS
-# This section defines what happens when you click the buttons.
-#================================================================================================
+$statusStrip = New-Object System.Windows.Forms.StatusStrip
+$statusLabel = New-Object System.Windows.Forms.ToolStripStatusLabel
+$statusLabel.Text = "Ready"
+[void]$statusStrip.Items.Add($statusLabel)
 
-$btn_select_all.Add_Click({
-    $checkboxes.Values | ForEach-Object { $_.Checked = $true }
-})
+[void]$mainForm.Controls.Add($tabs)
+[void]$mainForm.Controls.Add($cbRestorePoint)
+[void]$mainForm.Controls.Add($btnSelectAll)
+[void]$mainForm.Controls.Add($btnDeselectAll)
+[void]$mainForm.Controls.Add($btnRecommended)
+[void]$mainForm.Controls.Add($btnRefresh)
+[void]$mainForm.Controls.Add($btnApply)
+[void]$mainForm.Controls.Add($btnUndoLast)
+[void]$mainForm.Controls.Add($btnCancel)
+[void]$mainForm.Controls.Add($progress)
+[void]$mainForm.Controls.Add($outputBox)
+[void]$mainForm.Controls.Add($statusStrip)
 
-$btn_deselect_all.Add_Click({
-    $checkboxes.Values | ForEach-Object { $_.Checked = $false }
-})
+#------------------------------------------------------------------------------------------------
+# 11) State Refresh
+#------------------------------------------------------------------------------------------------
+function Refresh-TweakStates {
+    foreach ($t in $Script:Tweaks) {
+        $state = "Unknown"
+        try {
+            if (-not (& $t.IsAvailable)) { $state = "NotAvailable" }
+            else { $state = & $t.GetState }
+        } catch { $state = "Unknown" }
 
-# --- Modified Apply Button Click Event with Confirmation Dialogs and Status Bar Updates ---
-$btn_apply.Add_Click({
-    # Store original text for restoration
-    $originalButtonText = $btn_apply.Text
+        $lbl = $Script:StateLabels[$t.Id]
+        if ($lbl) {
+            $lbl.Text = $state
+            $lbl.ForeColor = switch ($state) {
+                "Applied" { [System.Drawing.Color]::LimeGreen }
+                "NotApplied" { [System.Drawing.Color]::Silver }
+                "Partial" { [System.Drawing.Color]::Gold }
+                "NotAvailable" { [System.Drawing.Color]::Gray }
+                "N-A" { [System.Drawing.Color]::Gray }
+                default { [System.Drawing.Color]::Orange }
+            }
+        }
 
-    # Disable button to prevent multiple clicks during execution
-    $btn_apply.Enabled = $false
-    $output_box.Clear()
-    $status_label.Text = "" # Clear status bar at start
+        $cb = $Script:CheckBoxes[$t.Id]
+        if ($cb) { $cb.Enabled = (& $t.IsAvailable) }
+    }
+}
 
-    Write-Log -Message "Starting optimizations..." -OutputBox $output_box -StatusLabel $status_label
+#------------------------------------------------------------------------------------------------
+# 12) Apply Engine (UI Timer)
+#     BackgroundWorker threads do not have a PowerShell runspace by default and will fail when invoking
+#     ScriptBlocks. To keep the UI responsive without cross-thread/runspace issues, we execute the selected
+#     tweaks incrementally on the UI thread using a WinForms Timer.
+#------------------------------------------------------------------------------------------------
+$Script:ApplyRun = $null
+$applyTimer = New-Object System.Windows.Forms.Timer
+$applyTimer.Interval = 50
 
-    # Execute checked functions in order with progress updates and confirmations
-    if ($checkboxes["Delete Temporary Files"].Checked) {
-        $dialogResult = [System.Windows.Forms.MessageBox]::Show(
-            "Are you sure you want to delete temporary files? This action cannot be undone.",
-            "Confirm Delete Temporary Files",
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        )
-        if ($dialogResult -eq [System.Windows.Forms.DialogResult]::Yes) {
-            $btn_apply.Text = "Working: Deleting Temp Files..." # Progress update
-            [System.Windows.Forms.Application]::DoEvents() # Force GUI refresh
-            Invoke-DeleteTempFiles -OutputBox $output_box -StatusLabel $status_label
+function Set-UiRunningState {
+    param([bool]$IsRunning)
+
+    $btnApply.Enabled        = -not $IsRunning
+    $btnCancel.Enabled       = $IsRunning
+    $btnSelectAll.Enabled    = -not $IsRunning
+    $btnDeselectAll.Enabled  = -not $IsRunning
+    $btnRecommended.Enabled  = -not $IsRunning
+    $btnRefresh.Enabled      = -not $IsRunning
+    $btnUndoLast.Enabled     = -not $IsRunning
+    $btnOosu.Enabled         = -not $IsRunning
+    $cbRestorePoint.Enabled  = -not $IsRunning
+}
+
+function Start-ApplyRun {
+    param(
+        [Parameter(Mandatory=$true)][string[]]$SelectedIds,
+        [Parameter(Mandatory=$true)][bool]$CreateRestorePoint
+    )
+
+    $Script:ApplyRun = [pscustomobject]@{
+        SelectedIds        = $SelectedIds
+        Queue             = New-Object System.Collections.Generic.Queue[string]
+        Total             = [Math]::Max(1,$SelectedIds.Count)
+        Index             = 0
+        BackupCtx         = (New-BackupContext)
+        CreateRestore     = $CreateRestorePoint
+        RestoreDone       = $false
+        CancelRequested   = $false
+        HadErrors         = $false
+        ManifestPath      = $null
+    }
+
+    foreach ($id in $SelectedIds) { [void]$Script:ApplyRun.Queue.Enqueue($id) }
+
+    Set-UiRunningState -IsRunning $true
+    $progress.Value = 0
+    $statusLabel.Text = "Starting..."
+    Write-Log -Message ("Starting apply run. Selected tweaks: {0}" -f ($SelectedIds -join ", ")) -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel
+
+    $applyTimer.Start()
+}
+
+function Complete-ApplyRun {
+    param(
+        [ValidateSet("Complete","Cancelled","Error")][string]$Outcome,
+        [string]$ErrorMessage = $null
+    )
+
+    $applyTimer.Stop()
+    Set-UiRunningState -IsRunning $false
+
+    if ($Outcome -eq "Cancelled") {
+        Write-Log -Message "Operation cancelled by user." -OutputBox $outputBox -Color Yellow -StatusLabel $statusLabel
+        $statusLabel.Text = "Cancelled"
+    } elseif ($Outcome -eq "Error") {
+        Write-Log -Message ("Worker error: {0}" -f $ErrorMessage) -OutputBox $outputBox -Color Red -StatusLabel $statusLabel
+        $statusLabel.Text = "Error"
+    } else {
+        $manifestPath = [string]$Script:ApplyRun.ManifestPath
+        if ([string]::IsNullOrWhiteSpace($manifestPath)) {
+            Write-Log -Message "Selected operations complete. Backup manifest was not saved." -OutputBox $outputBox -Color Yellow -StatusLabel $statusLabel
         } else {
-            Write-Log -Message "Skipped: Delete Temporary Files (User Cancelled)" -OutputBox $output_box -Color 'Orange' -StatusLabel $status_label
+            Write-Log -Message "Backup manifest saved: $manifestPath" -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel
+            if ($Script:ApplyRun.HadErrors) {
+                Write-Log -Message "Selected operations complete. Some items may have failed; review the log." -OutputBox $outputBox -Color Gold -StatusLabel $statusLabel
+            } else {
+                Write-Log -Message "Selected operations complete." -OutputBox $outputBox -Color Gold -StatusLabel $statusLabel
+            }
         }
+        $statusLabel.Text = "Complete"
+        Refresh-TweakStates
     }
 
-    if ($checkboxes["Disable Hibernation"].Checked) {
-        $dialogResult = [System.Windows.Forms.MessageBox]::Show(
-            "Disabling hibernation will free up disk space but remove the ability to use the Hibernate power option. Are you sure?",
-            "Confirm Disable Hibernation",
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        )
-        if ($dialogResult -eq [System.Windows.Forms.DialogResult]::Yes) {
-            $btn_apply.Text = "Working: Disabling Hibernation..." # Progress update
-            [System.Windows.Forms.Application]::DoEvents()
-            Invoke-DisableHibernation -OutputBox $output_box -StatusLabel $status_label
-        } else {
-            Write-Log -Message "Skipped: Disable Hibernation (User Cancelled)" -OutputBox $output_box -Color 'Orange' -StatusLabel $status_label
-        }
-    }
+    $progress.Value = 0
+    $Script:ApplyRun = $null
+}
 
-    if ($checkboxes["Optimize Services"].Checked) {
-        $btn_apply.Text = "Working: Optimizing Services..." # Progress update
-        [System.Windows.Forms.Application]::DoEvents()
-        Invoke-OptimizeServices -OutputBox $output_box -StatusLabel $status_label
-    }
-    if ($checkboxes["Disable Telemetry & Consumer Features"].Checked) {
-        $btn_apply.Text = "Working: Disabling Telemetry..." # Progress update
-        [System.Windows.Forms.Application]::DoEvents()
-        Invoke-DisableTelemetry -OutputBox $output_box -StatusLabel $status_label
-    }
-    if ($checkboxes["Disable Activity History"].Checked) {
-        $btn_apply.Text = "Working: Disabling Activity History..." # Progress update
-        [System.Windows.Forms.Application]::DoEvents()
-        Invoke-DisableActivityHistory -OutputBox $output_box -StatusLabel $status_label
-    }
-    if ($checkboxes["Disable Game DVR"].Checked) {
-        $btn_apply.Text = "Working: Disabling Game DVR..." # Progress update
-        [System.Windows.Forms.Application]::DoEvents()
-        Invoke-DisableGameDVR -OutputBox $output_box -StatusLabel $status_label
-    }
-    if ($checkboxes["Disable Background Apps"].Checked) {
-        $btn_apply.Text = "Working: Disabling Background Apps..." # Progress update
-        [System.Windows.Forms.Application]::DoEvents()
-        Invoke-DisableBackgroundApps -OutputBox $output_box -StatusLabel $status_label
-    }
-    if ($checkboxes["Disable Storage Sense"].Checked) {
-        $btn_apply.Text = "Working: Disabling Storage Sense..." # Progress update
-        [System.Windows.Forms.Application]::DoEvents()
-        Invoke-DisableStorageSense -OutputBox $output_box -StatusLabel $status_label
-    }
-    if ($checkboxes["Disable WiFi Sense"].Checked) {
-        $btn_apply.Text = "Working: Disabling WiFi Sense..." # Progress update
-        [System.Windows.Forms.Application]::DoEvents()
-        Invoke-DisableWifiSense -OutputBox $output_box -StatusLabel $status_label
-    }
-    if ($checkboxes["Disable Teredo"].Checked) {
-        $btn_apply.Text = "Working: Disabling Teredo..." # Progress update
-        [System.Windows.Forms.Application]::DoEvents()
-        Invoke-DisableTeredo -OutputBox $output_box -StatusLabel $status_label
-    }
-    if ($checkboxes["Disable Recall (Windows 11)"].Checked) {
-        $dialogResult = [System.Windows.Forms.MessageBox]::Show(
-            "Disabling Windows Recall is a significant system change. Are you sure you want to proceed?",
-            "Confirm Disable Windows Recall",
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        )
-        if ($dialogResult -eq [System.Windows.Forms.DialogResult]::Yes) {
-            $btn_apply.Text = "Working: Disabling Recall..." # Progress update
-            [System.Windows.Forms.Application]::DoEvents()
-            Invoke-DisableRecall -OutputBox $output_box -StatusLabel $status_label
-        } else {
-            Write-Log -Message "Skipped: Disable Recall (Windows 11) (User Cancelled)" -OutputBox $output_box -Color 'Orange' -StatusLabel $status_label
-        }
-    }
-    if ($checkboxes["Debloat Microsoft Edge"].Checked) {
-        $btn_apply.Text = "Working: Debloating Edge..." # Progress update
-        [System.Windows.Forms.Application]::DoEvents()
-        Invoke-DebloatEdge -OutputBox $output_box -StatusLabel $status_label
-    }
-    if ($checkboxes["Adobe Debloat"].Checked) {
-        $btn_apply.Text = "Working: Debloating Adobe..." # Progress update
-        [System.Windows.Forms.Application]::DoEvents()
-        Invoke-AdobeDebloat -OutputBox $output_box -StatusLabel $status_label
-    }
-    # NEW: Call Network Optimizations if checked
-    if ($checkboxes["Network Optimizations"].Checked) {
-        $btn_apply.Text = "Working: Optimizing Network..." # Progress update
-        [System.Windows.Forms.Application]::DoEvents()
-        Invoke-NetworkOptimizations -OutputBox $output_box -StatusLabel $status_label
-    }
-    
-    Write-Log -Message "--- ALL TASKS COMPLETE ---" -OutputBox $output_box -Color 'Gold' -StatusLabel $status_label
+$applyTimer.Add_Tick({
+    try {
+        if (-not $Script:ApplyRun) { $applyTimer.Stop(); return }
 
-    # Re-enable button and restore original text
-    $btn_apply.Enabled = $true
-    $btn_apply.Text = $originalButtonText
-    $status_label.Text = "All tasks completed successfully." # Final status message
+        if ($Script:ApplyRun.CancelRequested) {
+            Complete-ApplyRun -Outcome "Cancelled"
+            return
+        }
+
+        # Optional restore point step (first tick)
+        if ($Script:ApplyRun.CreateRestore -and -not $Script:ApplyRun.RestoreDone) {
+            $statusLabel.Text = "Working: Restore point"
+            try {
+                Write-Log -Message "Attempting to create System Restore Point..." -OutputBox $outputBox -Color Gold -StatusLabel $statusLabel
+                Checkpoint-Computer -Description ("Win11Tuner {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")) -RestorePointType "MODIFY_SETTINGS" | Out-Null
+                Write-Log -Message "Restore point created." -OutputBox $outputBox -Color LimeGreen -StatusLabel $statusLabel
+            } catch {
+                Write-Log -Message ("Restore point creation failed (non-fatal): {0}" -f $_.Exception.Message) -OutputBox $outputBox -Color Yellow -StatusLabel $statusLabel
+            } finally {
+                $Script:ApplyRun.RestoreDone = $true
+            }
+            return
+        }
+
+        if ($Script:ApplyRun.Queue.Count -eq 0) {
+            # Persist backup manifest at end of run
+            try {
+                $Script:ApplyRun.ManifestPath = Save-BackupManifest -BackupCtx $Script:ApplyRun.BackupCtx -SelectedTweakIds $Script:ApplyRun.SelectedIds
+            } catch {
+                Write-Log -Message ("Backup manifest save failed: {0}" -f $_.Exception.Message) -OutputBox $outputBox -Color Yellow -StatusLabel $statusLabel
+                $Script:ApplyRun.ManifestPath = $null
+            }
+            Complete-ApplyRun -Outcome "Complete"
+            return
+        }
+
+        $id = $Script:ApplyRun.Queue.Dequeue()
+        $Script:ApplyRun.Index++
+        $pct = [int](($Script:ApplyRun.Index / [double]$Script:ApplyRun.Total) * 100)
+        $progress.Value = [Math]::Min(100,[Math]::Max(0,$pct))
+        $statusLabel.Text = "Working: $id"
+
+        $t = $Script:Tweaks | Where-Object { $_.Id -eq $id } | Select-Object -First 1
+        if (-not $t) {
+            Write-Log -Message "Skipped unknown tweak id: $id" -OutputBox $outputBox -Color Yellow -StatusLabel $statusLabel
+            return
+        }
+
+        try {
+            & $t.Apply $Script:ApplyRun.BackupCtx $outputBox $statusLabel
+            if ($t.RequiresReboot) {
+                $Script:ApplyRun.HadErrors = $Script:ApplyRun.HadErrors # no-op; placeholder for reboot tracking if needed
+            }
+            Write-Log -Message ("OK: {0}" -f $t.Name) -OutputBox $outputBox -Color LimeGreen -StatusLabel $statusLabel
+        } catch {
+            $Script:ApplyRun.HadErrors = $true
+            Write-Log -Message ("ERROR: {0} failed -> {1}" -f $t.Name, $_.Exception.Message) -OutputBox $outputBox -Color Red -StatusLabel $statusLabel
+        }
+    } catch {
+        # Any unexpected timer exception should terminate the run cleanly rather than crash the UI.
+        Complete-ApplyRun -Outcome "Error" -ErrorMessage $_.Exception.Message
+    }
 })
 
-#================================================================================================
-# 5. SHOW THE FORM
-#================================================================================================
-$main_form.Add_Shown({$main_form.Activate()})
-[void]$main_form.ShowDialog()
+#------------------------------------------------------------------------------------------------
+# 13) UI Events
+#------------------------------------------------------------------------------------------------
+$btnSelectAll.Add_Click({ foreach ($cb in $Script:CheckBoxes.Values) { if ($cb.Enabled) { $cb.Checked = $true } } })
+$btnDeselectAll.Add_Click({ foreach ($cb in $Script:CheckBoxes.Values) { $cb.Checked = $false } })
+$btnRecommended.Add_Click({
+    foreach ($t in $Script:Tweaks) {
+        $cb = $Script:CheckBoxes[$t.Id]
+        if (-not $cb) { continue }
+        if (-not $cb.Enabled) { $cb.Checked = $false; continue }
+        $cb.Checked = (($t.Risk -ne "High") -and ($t.Category -ne "Maintenance"))
+    }
+})
+$btnRefresh.Add_Click({ Refresh-TweakStates })
+
+$btnCancel.Add_Click({
+    if ($Script:ApplyRun) {
+        $Script:ApplyRun.CancelRequested = $true
+        $btnCancel.Enabled = $false
+        $statusLabel.Text = "Cancelling..."
+    }
+})
+
+
+$btnApply.Add_Click({
+    if ($Script:ApplyRun) { return }
+
+    $selected = @()
+    foreach ($kv in $Script:CheckBoxes.GetEnumerator()) {
+        if ($kv.Value.Checked -and $kv.Value.Enabled) { $selected += $kv.Key }
+    }
+
+    if ($selected.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Select at least one tweak to apply.","Nothing Selected","OK","Information") | Out-Null
+        return
+    }
+
+    $high = @($Script:Tweaks | Where-Object { ($selected -contains $_.Id) -and ($_.Risk -eq "High") })
+    if ($high.Count -gt 0) {
+        $msg = "You selected High risk tweaks:`r`n`r`n" + ($high | ForEach-Object { "- $($_.Name)" } | Out-String) + "`r`nContinue?"
+        $r = [System.Windows.Forms.MessageBox]::Show($msg,"Confirm High Risk","YesNo","Warning")
+        if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    }
+
+    Start-ApplyRun -SelectedIds $selected -CreateRestorePoint ([bool]$cbRestorePoint.Checked)
+})
+
+$btnUndoLast.Add_Click({
+    $p = Load-LastBackupPath
+    if (-not $p) {
+        [System.Windows.Forms.MessageBox]::Show("No last-run backup manifest found.","Undo Last Run","OK","Information") | Out-Null
+        return
+    }
+    $ans = [System.Windows.Forms.MessageBox]::Show("This will restore settings captured in:`r`n$p`r`n`r`nProceed?","Undo Last Run","YesNo","Warning")
+    if ($ans -ne "Yes") { return }
+    try {
+        Restore-FromManifest -ManifestPath $p -OutputBox $outputBox -StatusLabel $statusLabel
+        Refresh-TweakStates
+    } catch {
+        Write-Log -Message "ERROR: Restore failed -> $($_.Exception.Message)" -OutputBox $outputBox -Color Red -StatusLabel $statusLabel
+    }
+})
+
+$btnOosu.Add_Click({
+    try { Invoke-OOSU10 -OutputBox $outputBox -StatusLabel $statusLabel }
+    catch { Write-Log -Message "ERROR: OOSU10 failed -> $($_.Exception.Message)" -OutputBox $outputBox -Color Red -StatusLabel $statusLabel }
+})
+
+$mainForm.Add_Shown({
+    Write-Log -Message "$($Script:AppName) v$($Script:AppVersion) ready." -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel
+    Write-Log -Message "Backups stored in: $Script:BackupRoot" -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel
+    Refresh-TweakStates
+})
+
+#------------------------------------------------------------------------------------------------
+# 14) Run
+#------------------------------------------------------------------------------------------------
+[void]$mainForm.ShowDialog()
