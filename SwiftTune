@@ -1,6 +1,17 @@
 #================================================================================================
 # StackPoint IT - Windows 11 Tuner / Optimization Tool
-# Version: 4.0
+# Version: 4.1
+# Changes from 4.0:
+#   - Added SysMain (Superfetch) disable tweak for SSD machines
+#   - Added Delivery Optimization P2P restriction tweak
+#   - Added Windows Search indexer scope reduction tweak
+#   - Added Copilot / AI tasks / Widgets disable tweak (25H2-specific)
+#   - Added Hibernate + Fast Startup disable tweak (reclaims 8-16GB on 16GB machines)
+#   - Added DISM StartComponentCleanup post-upgrade maintenance tweak
+#   - Added Intel/Dell driver diagnostic (read-only) maintenance tweak
+#   - Updated Recommended preset exclusion list
+#   - Added domain-join advisory for VBS/HVCI to form startup log
+#================================================================================================
 # Changes from 3.0:
 #   - Added Adobe to background app safelist
 #   - Removed wuauserv from service tweaks (patch compliance risk)
@@ -61,7 +72,7 @@ $Script:MainRunspace = [System.Management.Automation.Runspaces.Runspace]::Defaul
 # 3) Paths & Constants
 #------------------------------------------------------------------------------------------------
 $Script:AppName    = "StackPoint IT - Windows 11 Tuner"
-$Script:AppVersion = "4.0"
+$Script:AppVersion = "4.1"
 $Script:DataRoot   = Join-Path $env:ProgramData "StackPointTuner"
 $Script:BackupRoot = Join-Path $Script:DataRoot "Backups"
 $Script:LogRoot    = Join-Path $Script:DataRoot "Logs"
@@ -71,11 +82,10 @@ $Script:SessionLog = Join-Path $Script:LogRoot ("run_{0}.log" -f (Get-Date -Form
 New-Item -Path $Script:BackupRoot -ItemType Directory -Force | Out-Null
 New-Item -Path $Script:LogRoot    -ItemType Directory -Force | Out-Null
 
-# Initialise session log
 "[$($Script:AppName) v$($Script:AppVersion)] Session started: $(Get-Date)" | Set-Content -Path $Script:SessionLog -Encoding UTF8
 
 #------------------------------------------------------------------------------------------------
-# 4) UI-safe Logging Helpers (now also writes to file)
+# 4) UI-safe Logging Helpers
 #------------------------------------------------------------------------------------------------
 function Write-Log {
     param(
@@ -88,7 +98,6 @@ function Write-Log {
     $ts   = (Get-Date).ToString("HH:mm:ss")
     $line = "$ts - $Message`r`n"
 
-    # Write to file log (non-fatal)
     try { Add-Content -Path $Script:SessionLog -Value "$ts - $Message" -Encoding UTF8 -ErrorAction SilentlyContinue } catch { }
 
     $uiWork = [System.Windows.Forms.MethodInvoker]{
@@ -603,7 +612,6 @@ $Script:Tweaks += New-Tweak `
             "Microsoft.XboxIdentityProvider","Microsoft.XboxSpeechToTextOverlay",
             "Microsoft.ZuneMusic","Microsoft.ZuneVideo","Microsoft.YourPhone","Microsoft.Todos"
         )
-        # SAFELIST: M365, Adobe, RingCentral, OneDrive, SharePoint, browser
         $allowPatterns = @("MSTeams","Teams","RingCentral","OneDrive","Outlook","Office","SharePoint","Adobe","Acrobat","MicrosoftEdge","Edge")
         $pkgs = @(Get-AppxPackage -ErrorAction SilentlyContinue)
         $changed = 0
@@ -820,7 +828,6 @@ $serviceToggles = @(
     # wuauserv intentionally excluded — managed by WSUS/Intune in enterprise environments
 )
 
-# Services that must never be touched regardless of what's in the toggle list
 $Script:ServiceSafelist = @(
     "wuauserv",          # Windows Update - managed by Intune/WSUS
     "RingCentral",       # RingCentral core service
@@ -881,9 +888,8 @@ $Script:Tweaks += New-Tweak `
 
 $Script:Tweaks += New-Tweak `
     -Id "perf_vbs_disable" -Name "Disable VBS and Memory Integrity" -Category "Performance" -Risk "High" -RequiresReboot $true `
-    -Description "Disables Virtualization-Based Security for CPU/I/O gains. NOT recommended on Intune-enrolled or domain-joined machines — may trigger compliance violations." `
+    -Description "Disables Virtualization-Based Security for CPU/I/O gains. NOT recommended on Intune-enrolled or domain-joined machines — may trigger compliance violations. Use GPO for domain machines instead." `
     -IsAvailable {
-        # Disable this tweak on Intune-enrolled or domain-joined machines
         $intuneEnrolled = $false
         $domainJoined   = $false
         try { $cs = Get-CimInstance -ClassName Win32_ComputerSystem; $domainJoined = ($cs.PartOfDomain -eq $true) } catch { }
@@ -911,6 +917,150 @@ $Script:Tweaks += New-Tweak `
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" -Name "Enabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
     } `
     -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+# ---- NEW v4.1: Disable SysMain (Superfetch) ----
+$Script:Tweaks += New-Tweak `
+    -Id "perf_sysmain" -Name "Disable SysMain / Superfetch (SSD Recommended)" -Category "Performance" -Risk "Low" `
+    -Description "Disables SysMain service. On SSDs this service provides no benefit and generates constant low-level I/O. Windows 25H2 re-enables it during in-place upgrade. Fully reversible." `
+    -GetState {
+        $info = Get-ServiceStartupInfo -Name "SysMain"
+        if (-not $info.Exists) { "N-A" }
+        elseif ($info.StartupType -eq "Disabled") { "Applied" }
+        else { "NotApplied" }
+    } `
+    -Apply {
+        param($BackupCtx, $OutputBox, $StatusLabel)
+        Write-Log -Message "--- Disable SysMain (Superfetch) ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        try {
+            $disk = Get-PhysicalDisk -ErrorAction SilentlyContinue | Where-Object { $_.MediaType -eq "SSD" } | Select-Object -First 1
+            if (-not $disk) {
+                Write-Log -Message "WARNING: No SSD detected. SysMain is beneficial on HDD — consider skipping." -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+            } else {
+                Write-Log -Message "SSD detected: $($disk.FriendlyName). SysMain disable is appropriate." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+            }
+        } catch { }
+        try { Stop-Service -Name "SysMain" -Force -ErrorAction SilentlyContinue } catch { }
+        Set-ServiceStartup -BackupCtx $BackupCtx -Name "SysMain" -StartupType "Disabled" -OutputBox $OutputBox -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath, $OutputBox, $StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+# ---- NEW v4.1: Limit Delivery Optimization ----
+$Script:Tweaks += New-Tweak `
+    -Id "perf_delivery_opt" -Name "Limit Delivery Optimization (Disable P2P Seeding)" -Category "Performance" -Risk "Low" `
+    -Description "Sets Delivery Optimization to HTTP-only mode (no LAN/WAN peer-to-peer). Stops the post-25H2 background seeding churn. Updates still download from Microsoft CDN — compliance unaffected." `
+    -GetState {
+        if (Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization" "DODownloadMode" 0) { "Applied" }
+        else { "NotApplied" }
+    } `
+    -Apply {
+        param($BackupCtx, $OutputBox, $StatusLabel)
+        Write-Log -Message "--- Limit Delivery Optimization (No P2P) ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        $p = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"
+        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "DODownloadMode"        -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "DOMaxUploadBandwidth"  -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SYSTEM\CurrentControlSet\Services\DoSvc" -Name "Start" -Value 4 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        try { Stop-Service -Name "DoSvc" -Force -ErrorAction SilentlyContinue } catch { }
+        Write-Log -Message "Delivery Optimization restricted to HTTP-only. P2P seeding disabled." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath, $OutputBox, $StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+# ---- NEW v4.1: Windows Search Indexer Scope Reduction ----
+$Script:Tweaks += New-Tweak `
+    -Id "perf_search_indexer" -Name "Reduce Windows Search Indexer Scope" -Category "Performance" -Risk "Medium" `
+    -Description "Disables cloud/Cortana search extensions, restricts indexer to user folders, disables web results, and throttles indexer to low-priority I/O. Addresses post-25H2 full-rebuild disk storm. Search still works." `
+    -GetState {
+        $a = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" "AllowCortana" 0
+        $b = Compare-RegExpected "HKLM:\SOFTWARE\Microsoft\Windows Search\Gather\Windows\SystemIndex" "RespectPowerModes" 1
+        if ($a -and $b) { "Applied" } elseif (-not $a -and -not $b) { "NotApplied" } else { "Partial" }
+    } `
+    -Apply {
+        param($BackupCtx, $OutputBox, $StatusLabel)
+        Write-Log -Message "--- Reduce Windows Search Indexer Scope ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        $pSearch = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"
+        $pGather = "HKLM:\SOFTWARE\Microsoft\Windows Search\Gather\Windows\SystemIndex"
+        Set-RegValue -BackupCtx $BackupCtx -Path $pSearch -Name "AllowCortana"           -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $pSearch -Name "AllowCloudSearch"       -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $pSearch -Name "DisableWebSearch"       -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $pSearch -Name "ConnectedSearchUseWeb"  -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $pSearch -Name "PreventIndexingOutlook" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $pGather -Name "RespectPowerModes"      -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $pGather -Name "UseLocalGatherer"       -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        try {
+            Stop-Service -Name "WSearch" -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 800
+            Start-Service -Name "WSearch" -ErrorAction SilentlyContinue
+            Write-Log -Message "Search indexer restarted at lower priority." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+        } catch { }
+        Write-Log -Message "Windows Search scope reduced. Indexer will rebuild at low I/O priority." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath, $OutputBox, $StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+# ---- NEW v4.1: Disable Copilot, Widgets, AI Tasks (25H2) ----
+$Script:Tweaks += New-Tweak `
+    -Id "perf_copilot_widgets" `
+    -Name "Disable Copilot, AI Tasks, and Taskbar Widgets (25H2)" `
+    -Category "Performance" -Risk "Low" `
+    -Description "Disables Windows Copilot sidebar, Widgets/News feed, taskbar Chat button, and 25H2 Recall/AI scheduled tasks. Policy keys are safe on all 25H2 hardware — tasks simply skip gracefully if Copilot+ features are absent." `
+    -GetState {
+        $a = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot" "TurnOffWindowsCopilot" 1
+        $b = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" "AllowNewsAndInterests" 0
+        if ($a -and $b) { "Applied" } elseif (-not $a -and -not $b) { "NotApplied" } else { "Partial" }
+    } `
+    -Apply {
+        param($BackupCtx, $OutputBox, $StatusLabel)
+        Write-Log -Message "--- Disable Copilot / AI Tasks / Widgets ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot" -Name "TurnOffWindowsCopilot" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowCopilotButton" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" -Name "AllowNewsAndInterests" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarDa" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarMn" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI" -Name "DisableAIDataAnalysis" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI" -Name "AllowRecallEnablement" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        $aiTasks = @(
+            "\Microsoft\Windows\WindowsAI\ContinuousUserExperienceTask",
+            "\Microsoft\Windows\WindowsAI\DalEvaluationTask",
+            "\Microsoft\Windows\Recall\ScreenshotTask",
+            "\Microsoft\Windows\Recall\BackupTask",
+            "\Microsoft\Windows\Recall\CaptureTriggerTask"
+        )
+        foreach ($task in $aiTasks) {
+            try { Disable-ScheduledTaskSafe -BackupCtx $BackupCtx -FullName $task -OutputBox $OutputBox -StatusLabel $StatusLabel }
+            catch { Write-Log -Message "Task not present on this hardware (expected): $task" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
+        }
+        Write-Log -Message "Copilot/AI/Widgets disabled. Restart required for all changes." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath, $OutputBox, $StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
+
+# ---- NEW v4.1: Disable Hibernate + Fast Startup ----
+$Script:Tweaks += New-Tweak `
+    -Id "perf_hibernate" -Name "Disable Hibernate and Fast Startup (Reclaims ~8-16 GB)" -Category "Performance" `
+    -Risk "Low" -RequiresReboot $true `
+    -Description "Runs 'powercfg /h off' to delete hiberfile.sys (~8-16 GB on 16 GB machines) and disables Fast Startup. Fast Startup causes stale driver state after major upgrades — disabling it forces a clean cold boot every time. Security benefit: full kernel re-init on each shutdown." `
+    -GetState {
+        $hib = Get-RegValueInfo -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled"
+        if ($hib.ExistsValue -and [int]$hib.Value -eq 0) { "Applied" } else { "NotApplied" }
+    } `
+    -Apply {
+        param($BackupCtx, $OutputBox, $StatusLabel)
+        Write-Log -Message "--- Disable Hibernate + Fast Startup ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        $before = Get-DriveFreeGB
+        try {
+            & powercfg.exe /hibernate off 2>&1 | Out-Null
+            Write-Log -Message "Hibernate disabled. hiberfile.sys removed." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+        } catch {
+            Write-Log -Message "powercfg /hibernate off failed: $($_.Exception.Message)" -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel
+        }
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "HiberbootEnabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Write-DiskDelta -Before $before -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Write-Log -Message "Fast Startup disabled. Machine will perform full cold boot on every shutdown." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    } `
+    -Undo {
+        param($ManifestPath, $OutputBox, $StatusLabel)
+        Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel
+        try { & powercfg.exe /hibernate on 2>&1 | Out-Null } catch { }
+        Write-Log -Message "Hibernate re-enabled. hiberfile.sys will be recreated on next sleep." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    }
 
 #==== DEBLOAT ====
 
@@ -970,14 +1120,12 @@ $Script:Tweaks += New-Tweak `
         $procNames = @("Teams","ms-teams","Update","TeamsUpdater","MSTeams")
         foreach ($p in $procNames) { try { Stop-Process -Name $p -Force -ErrorAction SilentlyContinue } catch { } }
         Start-Sleep -Seconds 2
-
         $paths = @(
             (Join-Path $env:APPDATA "Microsoft\Teams"),
             (Join-Path $env:LOCALAPPDATA "Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams"),
             (Join-Path $env:LOCALAPPDATA "Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Roaming\Microsoft\Teams"),
             (Join-Path $env:LOCALAPPDATA "Microsoft\Teams")
         )
-        # Updated target list — includes new Teams cache directories
         $targets = @(
             "application cache","blob_storage","Cache","Code Cache","databases",
             "GPUCache","IndexedDB","Local Storage","tmp","Logs",
@@ -1034,19 +1182,14 @@ $Script:Tweaks += New-Tweak `
         Write-Log -Message "--- Clear Edge Browser Cache ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
         $before = Get-DriveFreeGB
         try { Stop-Process -Name "msedge" -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 1500 } catch { }
-
         $profileBase = Join-Path $env:LOCALAPPDATA "Microsoft\Edge\User Data"
         if (-not (Test-Path -LiteralPath $profileBase)) {
             Write-Log -Message "Edge profile directory not found. Skipping." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
             return
         }
-
-        # Handle Default profile and any numbered profiles (Profile 1, Profile 2 ...)
         $profiles = @(Join-Path $profileBase "Default")
         $profiles += @(Get-ChildItem -Path $profileBase -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "^Profile \d+" } | ForEach-Object { $_.FullName })
-
         $cacheDirs = @("Cache","Code Cache","GPUCache","IndexedDB","Service Worker","Network Persistent State","blob_storage")
-
         foreach ($prof in $profiles | Where-Object { Test-Path -LiteralPath $_ }) {
             Write-Log -Message "Clearing Edge profile: $(Split-Path -Leaf $prof)" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
             foreach ($d in $cacheDirs) {
@@ -1056,7 +1199,6 @@ $Script:Tweaks += New-Tweak `
                 }
             }
         }
-
         Write-Log -Message "Edge cache cleared. Edge will rebuild cache on next launch." -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel
         Write-DiskDelta -Before $before -OutputBox $OutputBox -StatusLabel $StatusLabel
     } `
@@ -1070,15 +1212,11 @@ $Script:Tweaks += New-Tweak `
         param($BackupCtx,$OutputBox,$StatusLabel)
         Write-Log -Message "--- Clear Adobe Acrobat Cache ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
         $before = Get-DriveFreeGB
-
-        # Stop Acrobat processes gracefully
         $adobeProcs = @("Acrobat","AcroCEF","AcroRd32","AcroRd64","AdobeCollabSync")
         foreach ($p in $adobeProcs) { try { Stop-Process -Name $p -Force -ErrorAction SilentlyContinue } catch { } }
         Start-Sleep -Milliseconds 1000
-
         $acrobatVersions = @("DC","2020","2017","2015","11.0")
         $cleared = 0
-
         foreach ($ver in $acrobatVersions) {
             $cachePaths = @(
                 (Join-Path $env:APPDATA    "Adobe\Acrobat\$ver\Cache"),
@@ -1097,13 +1235,10 @@ $Script:Tweaks += New-Tweak `
                 }
             }
         }
-
-        # Shared Adobe temp
         $sharedTemp = Join-Path $env:LOCALAPPDATA "Temp\Adobe Acrobat"
         if (Test-Path -LiteralPath $sharedTemp) {
             try { Remove-Item -LiteralPath $sharedTemp -Recurse -Force -ErrorAction SilentlyContinue; $cleared++ } catch { }
         }
-
         if ($cleared -eq 0) { Write-Log -Message "No Adobe Acrobat cache paths found for this user." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel }
         else { Write-Log -Message "Adobe Acrobat cache cleared ($cleared paths)." -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel }
         Write-DiskDelta -Before $before -OutputBox $OutputBox -StatusLabel $StatusLabel
@@ -1118,21 +1253,17 @@ $Script:Tweaks += New-Tweak `
         param($BackupCtx,$OutputBox,$StatusLabel)
         Write-Log -Message "--- Clear RingCentral Cache ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
         $before = Get-DriveFreeGB
-
         $rcProcs = @("RingCentral","RingCentralMeetings","RCMeetings","RingCentralPhone")
         foreach ($p in $rcProcs) { try { Stop-Process -Name $p -Force -ErrorAction SilentlyContinue } catch { } }
         Start-Sleep -Milliseconds 1500
-
         $rcPaths = @(
             (Join-Path $env:APPDATA    "RingCentral"),
             (Join-Path $env:LOCALAPPDATA "RingCentral"),
             (Join-Path $env:APPDATA    "RingCentral Meetings"),
             (Join-Path $env:LOCALAPPDATA "RingCentral Meetings")
         )
-
         $rcCacheDirs = @("Cache","Code Cache","GPUCache","logs","Logs","blob_storage","IndexedDB","Service Worker","tmp")
         $cleared = 0
-
         foreach ($root in $rcPaths | Where-Object { Test-Path -LiteralPath $_ }) {
             Write-Log -Message "Scanning: $root" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
             foreach ($d in $rcCacheDirs) {
@@ -1142,7 +1273,6 @@ $Script:Tweaks += New-Tweak `
                 }
             }
         }
-
         if ($cleared -eq 0) { Write-Log -Message "No RingCentral cache paths found for this user." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel }
         else { Write-Log -Message "RingCentral cache cleared ($cleared paths)." -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel }
         Write-DiskDelta -Before $before -OutputBox $OutputBox -StatusLabel $StatusLabel
@@ -1156,22 +1286,17 @@ $Script:Tweaks += New-Tweak `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
         Write-Log -Message "--- OneDrive Sync Health Diagnostic ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
-
         $odExe = "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe"
         if (-not (Test-Path -LiteralPath $odExe)) {
             Write-Log -Message "OneDrive executable not found at $odExe." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
             return
         }
-
-        # Check if OneDrive process is running
         $odProc = Get-Process -Name "OneDrive" -ErrorAction SilentlyContinue
         if ($odProc) {
             Write-Log -Message "OneDrive process: Running (PID $($odProc.Id))" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
         } else {
             Write-Log -Message "OneDrive process: NOT running." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
         }
-
-        # Read sync root from registry
         try {
             $syncRoot = (Get-RegValueInfo -Path "HKCU:\Software\Microsoft\OneDrive\Accounts\Business1" -Name "UserFolder").Value
             if ($syncRoot) { Write-Log -Message "OneDrive Business sync folder: $syncRoot" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
@@ -1180,8 +1305,6 @@ $Script:Tweaks += New-Tweak `
             $personalRoot = (Get-RegValueInfo -Path "HKCU:\Software\Microsoft\OneDrive\Accounts\Personal" -Name "UserFolder").Value
             if ($personalRoot) { Write-Log -Message "OneDrive Personal sync folder: $personalRoot" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
         } catch { }
-
-        # Check for pending sync items (odSyncStat not available via PS — check known status registry keys)
         $syncStatKeys = @(
             "HKCU:\Software\Microsoft\OneDrive\Accounts\Business1",
             "HKCU:\Software\Microsoft\OneDrive\Accounts\Personal"
@@ -1193,18 +1316,122 @@ $Script:Tweaks += New-Tweak `
                 if ($email) { Write-Log -Message "Account: $email | Last synced: $lastSynced" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
             } catch { }
         }
-
-        # Disk usage of OneDrive folder
         try {
             if ($syncRoot -and (Test-Path -LiteralPath $syncRoot)) {
                 $size = [math]::Round((Get-ChildItem -LiteralPath $syncRoot -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum / 1GB, 2)
                 Write-Log -Message "OneDrive local data size: $size GB" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
             }
         } catch { }
-
         Write-Log -Message "OneDrive health diagnostic complete." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
     } `
     -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "Diagnostic only — no undo needed." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
+
+# ---- NEW v4.1: DISM StartComponentCleanup (Post-Upgrade) ----
+$Script:Tweaks += New-Tweak `
+    -Id "maint_dism_cleanup" `
+    -Name "DISM: Post-Upgrade Component Cleanup — Frees 2-8 GB (IRREVERSIBLE)" `
+    -Category "Maintenance" -Risk "Medium" `
+    -Description "DISM /StartComponentCleanup /ResetBase permanently removes previous OS version files kept for the 25H2 rollback window. Typically frees 2-8 GB. WARNING: After this runs you cannot roll back to the prior Windows version. Only run after confirming 25H2 is stable. Takes 5-20 minutes." `
+    -GetState { "N-A" } `
+    -Apply {
+        param($BackupCtx, $OutputBox, $StatusLabel)
+        Write-Log -Message "--- DISM Post-Upgrade Component Cleanup (/ResetBase) ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "WARNING: This removes prior Windows version rollback files. This is PERMANENT." -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel
+        $before = Get-DriveFreeGB
+        $code = Invoke-ProcessLogged `
+            -FilePath "DISM.exe" `
+            -Arguments "/Online /Cleanup-Image /StartComponentCleanup /ResetBase" `
+            -Title "DISM StartComponentCleanup" `
+            -OutputBox $OutputBox `
+            -StatusLabel $StatusLabel
+        if ($code -notin 0, 3010) { throw "DISM StartComponentCleanup returned exit code $code." }
+        Write-DiskDelta -Before $before -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Write-Log -Message "Component cleanup complete. Prior OS rollback capability removed." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath, $OutputBox, $StatusLabel)
+        Write-Log -Message "Component cleanup is permanent — rollback files cannot be restored." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
+    }
+
+# ---- NEW v4.1: Intel/Dell Driver Diagnostic (Read-Only) ----
+$Script:Tweaks += New-Tweak `
+    -Id "maint_driver_diag" `
+    -Name "Intel/Dell Driver Diagnostic (Read-Only)" `
+    -Category "Maintenance" -Risk "Low" `
+    -Description "Read-only scan: checks Intel graphics driver version against OEM thresholds, reports BIOS version, model, storage driver health, and flags any PnP devices with errors. No changes made — results logged for review and Dell Command Update action." `
+    -GetState { "N-A" } `
+    -Apply {
+        param($BackupCtx, $OutputBox, $StatusLabel)
+        Write-Log -Message "--- Intel/Dell Driver Diagnostic ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+
+        # System model
+        try {
+            $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+            Write-Log -Message "Model: $($cs.Manufacturer) $($cs.Model)" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
+        } catch { }
+
+        # BIOS
+        try {
+            $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction Stop
+            Write-Log -Message "BIOS: $($bios.Manufacturer) | Version: $($bios.SMBIOSBIOSVersion) | Date: $($bios.ReleaseDate)" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
+            if ($bios.Manufacturer -notmatch "Dell") {
+                Write-Log -Message "  NOTE: Non-Dell BIOS — verify machine identity." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
+            }
+        } catch { }
+
+        # Intel display driver
+        try {
+            $gpuDrivers = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop | Where-Object { $_.Name -match "Intel" })
+            if ($gpuDrivers.Count -gt 0) {
+                foreach ($gpu in $gpuDrivers) {
+                    Write-Log -Message "GPU: $($gpu.Name)" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
+                    Write-Log -Message "  Driver Version : $($gpu.DriverVersion)" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+                    Write-Log -Message "  Driver Date    : $($gpu.DriverDate)" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+                    $verParts = $gpu.DriverVersion -split "\."
+                    if ($verParts.Count -ge 2) {
+                        $major = [int]$verParts[0]; $minor = [int]$verParts[1]
+                        # OEM Intel DCH drivers are 31.x+ as of 2025-2026
+                        if ($major -lt 31) {
+                            Write-Log -Message "  STATUS: INBOX/OUTDATED DRIVER (< 31.x)" -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel
+                            Write-Log -Message "  ACTION: Run Dell Command Update or install Intel DCH driver from intel.com/download" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+                        } else {
+                            Write-Log -Message "  STATUS: Driver is current OEM range (31.x+)" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+                        }
+                    }
+                }
+            } else {
+                Write-Log -Message "No Intel GPU detected (may be AMD/NVIDIA discrete)." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+            }
+        } catch {
+            Write-Log -Message "GPU driver query failed: $($_.Exception.Message)" -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
+        }
+
+        # Storage devices
+        try {
+            $storDevices = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.Class -eq "DiskDrive" -or $_.Class -eq "SCSIAdapter" } | Select-Object -First 5)
+            foreach ($d in $storDevices) {
+                $statusColor = if ($d.Status -eq "OK") { [System.Drawing.Color]::Silver } else { [System.Drawing.Color]::Salmon }
+                Write-Log -Message "Storage: $($d.FriendlyName) | Status: $($d.Status)" -OutputBox $OutputBox -Color $statusColor -StatusLabel $StatusLabel
+            }
+        } catch { }
+
+        # PnP error summary
+        try {
+            $problemDevices = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.Status -ne "OK" })
+            if ($problemDevices.Count -gt 0) {
+                Write-Log -Message "--- Devices with errors ($($problemDevices.Count) found) ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+                foreach ($d in $problemDevices | Select-Object -First 10) {
+                    Write-Log -Message "  [$($d.Status)] $($d.FriendlyName) | Class: $($d.Class)" -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel
+                }
+            } else {
+                Write-Log -Message "No problem devices found in PnP device list." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+            }
+        } catch { }
+
+        Write-Log -Message "Driver diagnostic complete. Review ACTION items above." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    } `
+    -Undo { param($ManifestPath, $OutputBox, $StatusLabel)
+        Write-Log -Message "Diagnostic only — no undo needed." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+    }
 
 #------------------------------------------------------------------------------------------------
 # 11) GUI Construction
@@ -1250,17 +1477,23 @@ $Script:StateLabels = @{}
 
 function Add-TweaksToTab {
     param([System.Windows.Forms.TabPage]$Tab,[string]$Category)
+    $scrollPanel = New-Object System.Windows.Forms.Panel
+    $scrollPanel.Location   = New-Object System.Drawing.Point -ArgumentList 0, 0
+    $scrollPanel.Size       = New-Object System.Drawing.Size -ArgumentList 700, 340
+    $scrollPanel.AutoScroll = $true
+    $scrollPanel.BackColor  = $Tab.BackColor
+
     $y = 15
     foreach ($t in $Script:Tweaks | Where-Object { $_.Category -eq $Category }) {
         $cb = New-Object System.Windows.Forms.CheckBox
         $cb.Text     = $t.Name
         $cb.Location = New-Object System.Drawing.Point -ArgumentList 15, $y
-        $cb.Size     = New-Object System.Drawing.Size -ArgumentList 500, 22
+        $cb.Size     = New-Object System.Drawing.Size -ArgumentList 490, 22
         $cb.ForeColor = [System.Drawing.Color]::White
         $cb.BackColor = $Tab.BackColor
 
         $lbl = New-Object System.Windows.Forms.Label
-        $lbl.Location  = New-Object System.Drawing.Point -ArgumentList 540, ($y+2)
+        $lbl.Location  = New-Object System.Drawing.Point -ArgumentList 525, ($y+2)
         $lbl.Size      = New-Object System.Drawing.Size -ArgumentList 155, 20
         $lbl.ForeColor = [System.Drawing.Color]::Silver
         $lbl.TextAlign = 'MiddleRight'
@@ -1271,12 +1504,11 @@ function Add-TweaksToTab {
         $Script:CheckBoxes[$t.Id]  = $cb
         $Script:StateLabels[$t.Id] = $lbl
 
-        [void]$Tab.Controls.Add($cb)
-        [void]$Tab.Controls.Add($lbl)
+        [void]$scrollPanel.Controls.Add($cb)
+        [void]$scrollPanel.Controls.Add($lbl)
         $y += 28
     }
 
-    # Per-tab Select All / Deselect All mini buttons
     $btnTabAll  = New-Object System.Windows.Forms.Button
     $btnTabNone = New-Object System.Windows.Forms.Button
     foreach ($b in @($btnTabAll,$btnTabNone)) {
@@ -1303,8 +1535,9 @@ function Add-TweaksToTab {
         }
     })
 
-    [void]$Tab.Controls.Add($btnTabAll)
-    [void]$Tab.Controls.Add($btnTabNone)
+    [void]$scrollPanel.Controls.Add($btnTabAll)
+    [void]$scrollPanel.Controls.Add($btnTabNone)
+    [void]$Tab.Controls.Add($scrollPanel)
 }
 
 Add-TweaksToTab -Tab $tabPrivacy     -Category "Privacy"
@@ -1364,7 +1597,6 @@ $statusLabel = New-Object System.Windows.Forms.ToolStripStatusLabel
 $statusLabel.Text = "Ready"
 [void]$statusStrip.Items.Add($statusLabel)
 
-# Log path label at top right
 $lblLogPath = New-Object System.Windows.Forms.Label
 $lblLogPath.Location  = New-Object System.Drawing.Point -ArgumentList 15, 853
 $lblLogPath.Size      = New-Object System.Drawing.Size -ArgumentList 715, 16
@@ -1539,9 +1771,15 @@ $btnDeselectAll.Add_Click({
     foreach ($cb in $Script:CheckBoxes.Values) { $cb.Checked = $false }
 })
 $btnRecommended.Add_Click({
-    # Recommended: Low/Medium risk from Privacy & Performance; Low risk Maintenance (cache clears)
-    # Excludes all High risk tweaks and heavy diagnostics (DISM, SFC)
-    $heavyMaint = @("maint_dism_restorehealth","maint_sfc_scannow","maint_onedrive_health")
+    # Recommended: Low risk Privacy & Performance; Low risk Maintenance cache clears.
+    # Excludes: High risk tweaks, heavy DISM/SFC ops, destructive cleanup, read-only diagnostics.
+    $heavyMaint = @(
+        "maint_dism_restorehealth",
+        "maint_sfc_scannow",
+        "maint_onedrive_health",
+        "maint_dism_cleanup",    # Destructive/irreversible — require explicit selection
+        "maint_driver_diag"      # Read-only diagnostic — exclude from auto-Recommended
+    )
     foreach ($t in $Script:Tweaks) {
         $cb = $Script:CheckBoxes[$t.Id]
         if (-not $cb -or -not $cb.Enabled) { if ($cb) { $cb.Checked = $false }; continue }
@@ -1586,6 +1824,14 @@ $btnApply.Add_Click({
         $r = [System.Windows.Forms.MessageBox]::Show($msg,"Confirm High Risk","YesNo","Warning")
         if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
     }
+    # Extra confirmation for irreversible destructive tweaks
+    $destructive = @($Script:Tweaks | Where-Object { ($selected -contains $_.Id) -and ($_.Id -eq "maint_dism_cleanup") })
+    if ($destructive.Count -gt 0) {
+        $r2 = [System.Windows.Forms.MessageBox]::Show(
+            "DISM StartComponentCleanup is selected.`r`n`r`nThis PERMANENTLY removes the ability to roll back to your previous Windows version.`r`n`r`nOnly proceed if Windows 25H2 has been stable for at least a week.`r`n`r`nAre you sure?",
+            "Confirm Destructive Action","YesNo","Warning")
+        if ($r2 -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    }
     Start-ApplyRun -SelectedIds $selected -CreateRestorePoint ([bool]$cbRestorePoint.Checked)
 })
 
@@ -1610,17 +1856,21 @@ $mainForm.Add_Shown({
     Write-Log -Message "Backups: $Script:BackupRoot" -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel
     Write-Log -Message "Session log: $Script:SessionLog" -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel
 
-    # Report machine context
     try {
         $cs = Get-CimInstance -ClassName Win32_ComputerSystem
         $domainInfo = if ($cs.PartOfDomain) { "Domain: $($cs.Domain)" } else { "Workgroup: $($cs.Workgroup)" }
         Write-Log -Message "Machine: $($cs.Name) | $domainInfo | RAM: $([math]::Round($cs.TotalPhysicalMemory/1GB,1)) GB" -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel
+
+        # Domain-join VBS advisory (v4.1)
+        if ($cs.PartOfDomain) {
+            Write-Log -Message "NOTE: Domain-joined machine. 'Disable VBS' is blocked here by design." -OutputBox $outputBox -Color Gold -StatusLabel $statusLabel
+            Write-Log -Message "      To disable VBS/HVCI via GPO: Computer Config > Admin Templates > System > Device Guard > Turn On VBS = Disabled." -OutputBox $outputBox -Color Gold -StatusLabel $statusLabel
+        }
     } catch { }
 
     $freeGB = Get-DriveFreeGB
     if ($null -ne $freeGB) { Write-Log -Message "C: drive free space: $freeGB GB" -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel }
 
-    # VBS guard notification
     $vbsCb = $Script:CheckBoxes["perf_vbs_disable"]
     if ($vbsCb -and -not $vbsCb.Enabled) {
         Write-Log -Message "NOTE: 'Disable VBS' is unavailable on this machine (domain-joined or Intune-enrolled)." -OutputBox $outputBox -Color Gold -StatusLabel $statusLabel
