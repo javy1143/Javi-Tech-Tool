@@ -1452,74 +1452,87 @@ function Get-InstalledApps {
     return $results | Sort-Object DisplayName
 }
 
-function Invoke-UninstallApp {
+function Get-UninstallMode {
+    # Returns 'Silent' if we can run without any UI, 'Interactive' otherwise.
+    # Silent = has an explicit QuietUninstallString, OR is MSI-based (we inject /qn).
+    param([Parameter(Mandatory=$true)][pscustomobject]$App)
+    if (-not [string]::IsNullOrWhiteSpace($App.QuietUninstall)) { return 'Silent' }
+    $us = $App.UninstallString
+    if ($us -match 'msiexec' -or $us -match '\{[0-9A-Fa-f\-]{36}\}') { return 'Silent' }
+    return 'Interactive'
+}
+
+function Build-SilentArgs {
+    # Given an app's uninstall string, return @{ Exe=...; Args=... } ready for silent launch.
+    param([Parameter(Mandatory=$true)][pscustomobject]$App)
+    # Prefer explicit quiet string
+    $rawCmd = if (-not [string]::IsNullOrWhiteSpace($App.QuietUninstall)) { $App.QuietUninstall }
+              else { $App.UninstallString }
+    $exe = ''; $argStr = ''
+    if ($rawCmd -match '^"([^"]+)"(.*)$')           { $exe = $matches[1].Trim(); $argStr = $matches[2].Trim() }
+    elseif ($rawCmd -match '^([^\s"]+\.exe)\s*(.*)$') { $exe = $matches[1].Trim(); $argStr = $matches[2].Trim() }
+    else                                               { $exe = $rawCmd.Trim() }
+
+    # Inject MSI quiet flags if this is an msiexec call without them
+    if ([string]::IsNullOrWhiteSpace($App.QuietUninstall)) {
+        $isMsi = ($exe -match 'msiexec' -or $argStr -match '\{[0-9A-Fa-f\-]{36}\}')
+        if ($isMsi -and $argStr -notmatch '/q|/quiet|/passive|/qn') {
+            $argStr = ($argStr -replace '/I\s*(\{)', '/X $1').Trim()
+            $argStr = "$argStr /qn /norestart".Trim()
+        }
+    }
+    return @{ Exe = $exe; Args = $argStr }
+}
+
+function Build-InteractiveArgs {
+    param([Parameter(Mandatory=$true)][pscustomobject]$App)
+    $rawCmd = $App.UninstallString
+    $exe = ''; $argStr = ''
+    if ($rawCmd -match '^"([^"]+)"(.*)$')           { $exe = $matches[1].Trim(); $argStr = $matches[2].Trim() }
+    elseif ($rawCmd -match '^([^\s"]+\.exe)\s*(.*)$') { $exe = $matches[1].Trim(); $argStr = $matches[2].Trim() }
+    else                                               { $exe = $rawCmd.Trim() }
+    return @{ Exe = $exe; Args = $argStr }
+}
+
+function Start-UninstallProcess {
+    # Launches the uninstaller process and returns the Process object (non-blocking).
     param(
         [Parameter(Mandatory=$true)][pscustomobject]$App,
+        [Parameter(Mandatory=$true)][bool]$Silent,
         [Parameter(Mandatory=$true)][System.Windows.Forms.RichTextBox]$OutputBox,
         [Parameter(Mandatory=$true)][System.Windows.Forms.ToolStripStatusLabel]$StatusLabel
     )
-
-    Write-Log -Message "==> Uninstalling: $($App.DisplayName)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
-
-    # Prefer quiet uninstall string
-    $rawCmd = if (-not [string]::IsNullOrWhiteSpace($App.QuietUninstall)) { $App.QuietUninstall } else { $App.UninstallString }
-
-    # Parse exe + arguments
-    $exe    = $null
-    $argStr = ""
-
-    if ($rawCmd -match '^"([^"]+)"(.*)$') {
-        $exe    = $matches[1].Trim()
-        $argStr = $matches[2].Trim()
-    } elseif ($rawCmd -match '^([^\s"]+\.exe)\s*(.*)$') {
-        $exe    = $matches[1].Trim()
-        $argStr = $matches[2].Trim()
-    } else {
-        $exe    = $rawCmd
-        $argStr = ""
-    }
+    $parsed = if ($Silent) { Build-SilentArgs -App $App } else { Build-InteractiveArgs -App $App }
+    $exe    = $parsed.Exe
+    $argStr = $parsed.Args
 
     if ([string]::IsNullOrWhiteSpace($exe)) {
-        Write-Log -Message "  ERROR: Could not parse uninstall string: $rawCmd" -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel
-        return $false
+        Write-Log -Message "  ERROR: Cannot parse uninstall string for $($App.DisplayName)" -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel
+        return $null
     }
 
-    # Inject quiet flags for MSI-based uninstallers if not already present
-    $isMsi = ($exe -match 'msiexec' -or $argStr -match '/[XI]\s*\{[0-9A-F-]+\}')
-    if ($isMsi -and $argStr -notmatch '/q|/quiet|/passive|/qn') {
-        # Swap /I for /X if present (install → uninstall), then add quiet
-        $argStr = $argStr -replace '/I\s*(\{)', '/X $1'
-        $argStr = "$argStr /qn /norestart"
-    }
-
-    Write-Log -Message "  Exe: $exe" -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel
-    if ($argStr) { Write-Log -Message "  Args: $argStr" -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
+    $modeLabel = if ($Silent) { 'silent' } else { 'interactive' }
+    Write-Log -Message "==> [$modeLabel] $($App.DisplayName)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
+    Write-Log -Message "    $exe $argStr".TrimEnd() -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel
 
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName               = $exe
-        $psi.Arguments              = $argStr
-        $psi.UseShellExecute        = $false
-        $psi.CreateNoWindow         = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError  = $true
-
-        $p = [System.Diagnostics.Process]::Start($psi)
-        $deadline = (Get-Date).AddSeconds(300)
-
-        while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
-            [System.Windows.Forms.Application]::DoEvents()
-            Start-Sleep -Milliseconds 250
+        $psi.FileName    = $exe
+        $psi.Arguments   = $argStr
+        if ($Silent) {
+            # Silent: capture output, no window
+            $psi.UseShellExecute        = $false
+            $psi.CreateNoWindow         = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError  = $true
+        } else {
+            # Interactive: let the installer draw its own UI
+            $psi.UseShellExecute = $true
         }
-
-        if (-not $p.HasExited) { try { $p.Kill() } catch { } }
-
-        $exitColor = if ($p.ExitCode -in 0,3010,1605) { $Script:Colors.Success } else { $Script:Colors.Danger }
-        Write-Log -Message "  Exit code: $($p.ExitCode)" -OutputBox $OutputBox -Color $exitColor -StatusLabel $StatusLabel
-        return ($p.ExitCode -in 0,3010,1605)
+        return [System.Diagnostics.Process]::Start($psi)
     } catch {
-        Write-Log -Message "  Uninstall exception: $($_.Exception.Message)" -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel
-        return $false
+        Write-Log -Message "  ERROR starting process: $($_.Exception.Message)" -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel
+        return $null
     }
 }
 
@@ -1529,82 +1542,78 @@ function Invoke-DeepClean {
         [Parameter(Mandatory=$true)][System.Windows.Forms.RichTextBox]$OutputBox,
         [Parameter(Mandatory=$true)][System.Windows.Forms.ToolStripStatusLabel]$StatusLabel
     )
+    Write-Log -Message "  [Deep Clean] $($App.DisplayName)" -OutputBox $OutputBox -Color $Script:Colors.BlueAccent -StatusLabel $StatusLabel
 
-    Write-Log -Message "  [Deep Clean] Scanning for leftovers..." -OutputBox $OutputBox -Color $Script:Colors.BlueAccent -StatusLabel $StatusLabel
-
-    # Build search terms: first meaningful word from name and publisher
+    # Build search terms from app name + publisher
     $searchTerms = @()
-    $cleanName = $App.DisplayName -replace '\s+\d[\d\.\s]*$','' -replace '\s+(x86|x64|32.bit|64.bit)$','' -replace '[^a-zA-Z0-9\s]','' -replace '\s+',' '
+    $cleanName   = $App.DisplayName -replace '\s+\d[\d\.\s]*$','' -replace '\s+(x86|x64|32.bit|64.bit)$','' `
+                                    -replace '[^a-zA-Z0-9\s]',''  -replace '\s+',' '
     $nameWords = @($cleanName.Trim() -split ' ' | Where-Object { $_.Length -gt 3 })
     if ($nameWords.Count -gt 0) { $searchTerms += $nameWords[0] }
-
     if ($App.Publisher -and $App.Publisher.Trim().Length -gt 3) {
         $pubWords = @($App.Publisher.Trim() -split '\s+' | Where-Object { $_.Length -gt 3 })
-        if ($pubWords.Count -gt 0 -and -not ($searchTerms -contains $pubWords[0])) { $searchTerms += $pubWords[0] }
+        if ($pubWords.Count -gt 0 -and ($searchTerms -notcontains $pubWords[0])) { $searchTerms += $pubWords[0] }
+    }
+    if ($searchTerms.Count -eq 0) {
+        Write-Log -Message "  No usable search terms — skipping deep clean." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel
+        return
     }
 
     $removed = 0
 
-    # Explicit install location first
+    # 1. Explicit InstallLocation
     if (-not [string]::IsNullOrWhiteSpace($App.InstallLocation)) {
         $loc = $App.InstallLocation.TrimEnd('\').Trim()
         if ($loc.Length -gt 5 -and (Test-Path -LiteralPath $loc)) {
             Write-Log -Message "  Leftover install dir: $loc" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
-            try { Remove-Item -LiteralPath $loc -Recurse -Force -ErrorAction Stop; $removed++; Write-Log -Message "  Removed: $loc" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+            try { Remove-Item -LiteralPath $loc -Recurse -Force -ErrorAction Stop; $removed++
+                  Write-Log -Message "  Removed: $loc" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
             catch { Write-Log -Message "  Could not remove (in use?): $loc" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
         }
     }
 
-    # File system scan — user and shared profile dirs
+    # 2. File system scan
     $fsScanRoots = @(
         $env:APPDATA, $env:LOCALAPPDATA, $env:ProgramData,
         $env:ProgramFiles, ${env:ProgramFiles(x86)},
         (Join-Path $env:LOCALAPPDATA "Programs"),
         (Join-Path $env:ProgramData  "Microsoft\Windows\Start Menu\Programs")
     )
-
     foreach ($root in $fsScanRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) }) {
         foreach ($term in $searchTerms) {
             try {
-                $hits = @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
-                          Where-Object { $_.Name -like "*$term*" })
+                $hits = @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*$term*" })
                 foreach ($h in $hits) {
                     Write-Log -Message "  Leftover folder: $($h.FullName)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
-                    try { Remove-Item -LiteralPath $h.FullName -Recurse -Force -ErrorAction Stop; $removed++; Write-Log -Message "  Removed: $($h.FullName)" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+                    try { Remove-Item -LiteralPath $h.FullName -Recurse -Force -ErrorAction Stop; $removed++
+                          Write-Log -Message "  Removed: $($h.FullName)" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
                     catch { Write-Log -Message "  Could not remove: $($h.FullName)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
                 }
             } catch { }
         }
     }
 
-    # Registry scan
-    $regScanRoots = @(
-        "HKLM:\SOFTWARE",
-        "HKLM:\SOFTWARE\WOW6432Node",
-        "HKCU:\SOFTWARE",
-        "HKCU:\SOFTWARE\Classes"
-    )
-
+    # 3. Registry scan — skip known safe system paths
+    $regScanRoots = @("HKLM:\SOFTWARE","HKLM:\SOFTWARE\WOW6432Node","HKCU:\SOFTWARE","HKCU:\SOFTWARE\Classes")
     foreach ($regRoot in $regScanRoots) {
         foreach ($term in $searchTerms) {
             try {
-                $keys = @(Get-ChildItem -Path $regRoot -ErrorAction SilentlyContinue |
-                          Where-Object { $_.PSChildName -like "*$term*" })
+                $keys = @(Get-ChildItem -Path $regRoot -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like "*$term*" })
                 foreach ($key in $keys) {
-                    # Safety: never touch Microsoft, Windows, or known system key paths
-                    $safe = $key.PSPath -notmatch '\\(Microsoft\\Windows|Classes\\CLSID|Classes\\Interface|Classes\\TypeLib)\\'
-                    if (-not $safe) { continue }
-                    Write-Log -Message "  Leftover registry key: $($key.PSPath)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
-                    try { Remove-Item -LiteralPath $key.PSPath -Recurse -Force -ErrorAction Stop; $removed++; Write-Log -Message "  Removed: $($key.PSPath)" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+                    if ($key.PSPath -match '\\(Microsoft\\Windows|Classes\\CLSID|Classes\\Interface|Classes\\TypeLib)\\') { continue }
+                    Write-Log -Message "  Leftover reg key: $($key.PSPath)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
+                    try { Remove-Item -LiteralPath $key.PSPath -Recurse -Force -ErrorAction Stop; $removed++
+                          Write-Log -Message "  Removed: $($key.PSPath)" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
                     catch { Write-Log -Message "  Could not remove: $($key.PSPath)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
                 }
             } catch { }
         }
     }
 
-    if ($removed -eq 0) { Write-Log -Message "  No additional leftovers found." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
-    else { Write-Log -Message "  Deep clean complete: $removed leftover items removed." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+    if ($removed -eq 0) { Write-Log -Message "  No leftovers found." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
+    else { Write-Log -Message "  Deep clean: $removed item(s) removed." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
 }
+
 
 #------------------------------------------------------------------------------------------------
 # 11) GUI Construction
@@ -2121,23 +2130,55 @@ $applyTimer.Add_Tick({
 # 13.5) Uninstall Engine
 #------------------------------------------------------------------------------------------------
 $Script:UninstallRun = $null
-$uninstallTimer = New-Object System.Windows.Forms.Timer
-$uninstallTimer.Interval = 50
+$uninstallTimer      = New-Object System.Windows.Forms.Timer
+$uninstallTimer.Interval = 100   # 100ms poll — enough for interactive process watching
 
 function Start-UninstallRun {
-    param([Parameter(Mandatory=$true)][pscustomobject[]]$AppsToRemove,[bool]$DeepClean = $false)
-    $Script:UninstallRun = [pscustomobject]@{
-        Queue     = New-Object System.Collections.Generic.Queue[pscustomobject]
-        Total     = [Math]::Max(1,$AppsToRemove.Count)
-        Index     = 0
-        DeepClean = $DeepClean
-        HadErrors = $false
-        Done      = @()
+    param(
+        [Parameter(Mandatory=$true)][pscustomobject[]]$AppsToRemove,
+        [bool]$DeepClean = $false
+    )
+
+    # Classify each app up front
+    $interactiveList = New-Object System.Collections.Generic.List[pscustomobject]
+    $silentList      = New-Object System.Collections.Generic.List[pscustomobject]
+    foreach ($app in $AppsToRemove) {
+        if ((Get-UninstallMode -App $app) -eq 'Silent') { $silentList.Add($app) }
+        else { $interactiveList.Add($app) }
     }
-    foreach ($a in $AppsToRemove) { [void]$Script:UninstallRun.Queue.Enqueue($a) }
+
+    $interactiveQueue = New-Object System.Collections.Generic.Queue[pscustomobject]
+    $silentQueue      = New-Object System.Collections.Generic.Queue[pscustomobject]
+    foreach ($a in $interactiveList) { $interactiveQueue.Enqueue($a) }
+    foreach ($a in $silentList)      { $silentQueue.Enqueue($a) }
+
+    $Script:UninstallRun = [pscustomobject]@{
+        Phase            = 'Interactive'   # Interactive | Silent | DeepClean
+        InteractiveQueue = $interactiveQueue
+        SilentQueue      = $silentQueue
+        DeepCleanQueue   = New-Object System.Collections.Generic.Queue[pscustomobject]
+        TotalApps        = $AppsToRemove.Count
+        TotalProcessed   = 0
+        CurrentProcess   = $null
+        CurrentApp       = $null
+        SucceededApps    = New-Object System.Collections.Generic.List[pscustomobject]
+        DoDeepClean      = $DeepClean
+        HadErrors        = $false
+    }
+
     Set-UiRunningState -IsRunning $true
     $progress.Value = 0
-    Write-Log -Message ("=== Uninstall run: {0} app(s) queued ===" -f $AppsToRemove.Count) -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
+
+    Write-Log -Message ("=== Uninstall queued: {0} interactive, {1} silent ===" -f $interactiveList.Count, $silentList.Count) `
+              -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
+
+    if ($interactiveList.Count -eq 0 -and $silentList.Count -gt 0) {
+        # Nothing interactive — go straight to silent phase
+        Write-Log -Message "All selected apps support silent uninstall — no user interaction required." `
+                  -OutputBox $outputBox -Color $Script:Colors.BlueAccent -StatusLabel $statusLabel
+        $Script:UninstallRun.Phase = 'Silent'
+    }
+
     $uninstallTimer.Start()
 }
 
@@ -2145,41 +2186,137 @@ function Complete-UninstallRun {
     $uninstallTimer.Stop()
     Set-UiRunningState -IsRunning $false
     $progress.Value = 0
-    $doneCount = $Script:UninstallRun.Done.Count
-    Write-Log -Message ("=== Uninstall run complete. {0}/{1} succeeded ===" -f $doneCount, $Script:UninstallRun.Total) -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
+    $ok  = $Script:UninstallRun.SucceededApps.Count
+    $tot = $Script:UninstallRun.TotalApps
+    Write-Log -Message ("=== Uninstall complete: {0}/{1} succeeded ===" -f $ok, $tot) `
+              -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
     $statusLabel.Text = "Uninstall complete"
     $Script:UninstallRun = $null
-    # Reload the app list after removal
-    Start-Sleep -Milliseconds 1000
+    Start-Sleep -Milliseconds 800
     Refresh-UninstallList
+}
+
+# Helper — update progress bar from current processed count
+function Update-UninstallProgress {
+    if (-not $Script:UninstallRun) { return }
+    $pct = if ($Script:UninstallRun.TotalApps -gt 0) {
+        [int](($Script:UninstallRun.TotalProcessed / [double]$Script:UninstallRun.TotalApps) * 100)
+    } else { 0 }
+    $progress.Value = [Math]::Min(100, [Math]::Max(0, $pct))
 }
 
 $uninstallTimer.Add_Tick({
     try {
         if (-not $Script:UninstallRun) { $uninstallTimer.Stop(); return }
-        if ($Script:UninstallRun.Queue.Count -eq 0) { Complete-UninstallRun; return }
 
-        $app = $Script:UninstallRun.Queue.Dequeue()
-        $Script:UninstallRun.Index++
-        $pct = [int](($Script:UninstallRun.Index / [double]$Script:UninstallRun.Total) * 100)
-        $progress.Value = [Math]::Min(100,[Math]::Max(0,$pct))
-        $statusLabel.Text = "Uninstalling: $($app.DisplayName)"
+        # ── If a process is currently running, poll it ──────────────────────────
+        if ($null -ne $Script:UninstallRun.CurrentProcess) {
+            $proc = $Script:UninstallRun.CurrentProcess
+            if (-not $proc.HasExited) { return }   # still running — come back next tick
 
-        try {
-            $ok = Invoke-UninstallApp -App $app -OutputBox $outputBox -StatusLabel $statusLabel
-            if ($ok) {
-                [void]$Script:UninstallRun.Done.Add($app.DisplayName)
-                if ($Script:UninstallRun.DeepClean) {
-                    Invoke-DeepClean -App $app -OutputBox $outputBox -StatusLabel $statusLabel
-                }
+            # Process has finished
+            $exitCode = $proc.ExitCode
+            $app      = $Script:UninstallRun.CurrentApp
+            $isSilent = ($Script:UninstallRun.Phase -eq 'Silent')
+            $success  = ($exitCode -in 0, 3010, 1605)
+
+            $exitColor = if ($success) { $Script:Colors.Success } else { $Script:Colors.Danger }
+            Write-Log -Message "  Exit code: $exitCode" -OutputBox $outputBox -Color $exitColor -StatusLabel $statusLabel
+
+            if ($success) {
+                [void]$Script:UninstallRun.SucceededApps.Add($app)
             } else {
                 $Script:UninstallRun.HadErrors = $true
+                Write-Log -Message "  WARNING: $($app.DisplayName) may not have uninstalled cleanly (exit $exitCode)." `
+                          -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
             }
-        } catch {
-            $Script:UninstallRun.HadErrors = $true
-            Write-Log -Message "  ERROR during uninstall: $($_.Exception.Message)" -OutputBox $outputBox -Color $Script:Colors.Danger -StatusLabel $statusLabel
+
+            $Script:UninstallRun.TotalProcessed++
+            $Script:UninstallRun.CurrentProcess = $null
+            $Script:UninstallRun.CurrentApp      = $null
+            Update-UninstallProgress
+            return   # let the next tick start the next app
         }
-    } catch { $uninstallTimer.Stop(); Set-UiRunningState -IsRunning $false; Write-Log -Message "Uninstall engine error: $($_.Exception.Message)" -OutputBox $outputBox -Color $Script:Colors.Danger -StatusLabel $statusLabel }
+
+        # ── No active process — advance the state machine ───────────────────────
+
+        switch ($Script:UninstallRun.Phase) {
+
+            'Interactive' {
+                if ($Script:UninstallRun.InteractiveQueue.Count -gt 0) {
+                    $app = $Script:UninstallRun.InteractiveQueue.Dequeue()
+                    $statusLabel.Text = "Waiting for user: $($app.DisplayName)"
+                    $proc = Start-UninstallProcess -App $app -Silent $false -OutputBox $outputBox -StatusLabel $statusLabel
+                    if ($null -ne $proc) {
+                        $Script:UninstallRun.CurrentProcess = $proc
+                        $Script:UninstallRun.CurrentApp     = $app
+                    } else {
+                        # Failed to start — count as processed, mark error
+                        $Script:UninstallRun.TotalProcessed++
+                        $Script:UninstallRun.HadErrors = $true
+                        Update-UninstallProgress
+                    }
+                } else {
+                    # Interactive queue drained — move to Silent
+                    if ($Script:UninstallRun.SilentQueue.Count -gt 0) {
+                        $n = $Script:UninstallRun.SilentQueue.Count
+                        Write-Log -Message ("--- {0} app{1} will now uninstall silently (no prompts) ---" -f $n, $(if($n -ne 1){'s'}else{''})) `
+                                  -OutputBox $outputBox -Color $Script:Colors.BlueAccent -StatusLabel $statusLabel
+                        $Script:UninstallRun.Phase = 'Silent'
+                    } elseif ($Script:UninstallRun.DoDeepClean -and $Script:UninstallRun.SucceededApps.Count -gt 0) {
+                        foreach ($a in $Script:UninstallRun.SucceededApps) { $Script:UninstallRun.DeepCleanQueue.Enqueue($a) }
+                        Write-Log -Message "--- Deep clean pass: scanning for leftover files and registry keys ---" `
+                                  -OutputBox $outputBox -Color $Script:Colors.BlueAccent -StatusLabel $statusLabel
+                        $Script:UninstallRun.Phase = 'DeepClean'
+                    } else {
+                        Complete-UninstallRun
+                    }
+                }
+            }
+
+            'Silent' {
+                if ($Script:UninstallRun.SilentQueue.Count -gt 0) {
+                    $app = $Script:UninstallRun.SilentQueue.Dequeue()
+                    $statusLabel.Text = "Uninstalling (silent): $($app.DisplayName)"
+                    $proc = Start-UninstallProcess -App $app -Silent $true -OutputBox $outputBox -StatusLabel $statusLabel
+                    if ($null -ne $proc) {
+                        $Script:UninstallRun.CurrentProcess = $proc
+                        $Script:UninstallRun.CurrentApp     = $app
+                    } else {
+                        $Script:UninstallRun.TotalProcessed++
+                        $Script:UninstallRun.HadErrors = $true
+                        Update-UninstallProgress
+                    }
+                } else {
+                    # Silent queue drained
+                    if ($Script:UninstallRun.DoDeepClean -and $Script:UninstallRun.SucceededApps.Count -gt 0) {
+                        foreach ($a in $Script:UninstallRun.SucceededApps) { $Script:UninstallRun.DeepCleanQueue.Enqueue($a) }
+                        Write-Log -Message "--- Deep clean pass: scanning for leftover files and registry keys ---" `
+                                  -OutputBox $outputBox -Color $Script:Colors.BlueAccent -StatusLabel $statusLabel
+                        $Script:UninstallRun.Phase = 'DeepClean'
+                    } else {
+                        Complete-UninstallRun
+                    }
+                }
+            }
+
+            'DeepClean' {
+                if ($Script:UninstallRun.DeepCleanQueue.Count -gt 0) {
+                    $app = $Script:UninstallRun.DeepCleanQueue.Dequeue()
+                    $statusLabel.Text = "Deep clean: $($app.DisplayName)"
+                    try { Invoke-DeepClean -App $app -OutputBox $outputBox -StatusLabel $statusLabel }
+                    catch { Write-Log -Message "  Deep clean error for $($app.DisplayName): $($_.Exception.Message)" -OutputBox $outputBox -Color $Script:Colors.Danger -StatusLabel $statusLabel }
+                } else {
+                    Complete-UninstallRun
+                }
+            }
+        }
+
+    } catch {
+        $uninstallTimer.Stop()
+        Set-UiRunningState -IsRunning $false
+        Write-Log -Message "Uninstall engine fatal error: $($_.Exception.Message)" -OutputBox $outputBox -Color $Script:Colors.Danger -StatusLabel $statusLabel
+    }
 })
 
 #------------------------------------------------------------------------------------------------
