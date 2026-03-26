@@ -1,6 +1,13 @@
 #================================================================================================
 # StackPoint IT - Windows 11 Tuner / Optimization Tool
-# Version: 4.1
+# Version: 4.2
+# Changes from 4.1:
+#   - Added Uninstaller tab: Control Panel-style app list with batch removal
+#   - Uninstaller performs deep scan for leftover files and registry keys post-uninstall
+#   - MSI and EXE uninstallers both handled with quiet-flag injection
+#   - System components, drivers, runtimes, and updates excluded from uninstaller list
+#   - Applied StackPoint IT color palette throughout (bg #18191b, surface #3f4347)
+#================================================================================================
 # Changes from 4.0:
 #   - Added SysMain (Superfetch) disable tweak for SSD machines
 #   - Added Delivery Optimization P2P restriction tweak
@@ -11,23 +18,6 @@
 #   - Added Intel/Dell driver diagnostic (read-only) maintenance tweak
 #   - Updated Recommended preset exclusion list
 #   - Added domain-join advisory for VBS/HVCI to form startup log
-#================================================================================================
-# Changes from 3.0:
-#   - Added Adobe to background app safelist
-#   - Removed wuauserv from service tweaks (patch compliance risk)
-#   - Added Intune/domain guard on VBS disable tweak
-#   - Added Edge cache cleanup maintenance tweak
-#   - Added Adobe Acrobat cache cleanup maintenance tweak
-#   - Added RingCentral cache cleanup maintenance tweak
-#   - Fixed Teams new cache paths (Service Worker, Network Persistent State, VideoCaptures)
-#   - Added OneDrive pause/resume around temp file cleanup
-#   - Added persistent file logging to $Script:DataRoot\Logs\
-#   - Maintenance tweaks (Low risk) now included in Recommended preset
-#   - Added Export Log button
-#   - Added per-tab Select/Deselect buttons on each tab panel
-#   - Added disk space delta reporting around cleanup tweaks
-#   - Added OneDrive sync health diagnostic tweak
-#   - Added RingCentral to service safeguard list
 #================================================================================================
 
 #requires -Version 5.1
@@ -69,10 +59,10 @@ try {
 $Script:MainRunspace = [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace
 
 #------------------------------------------------------------------------------------------------
-# 3) Paths & Constants
+# 3) Paths, Constants & Color Palette
 #------------------------------------------------------------------------------------------------
 $Script:AppName    = "StackPoint IT - Windows 11 Tuner"
-$Script:AppVersion = "4.1"
+$Script:AppVersion = "4.2"
 $Script:DataRoot   = Join-Path $env:ProgramData "StackPointTuner"
 $Script:BackupRoot = Join-Path $Script:DataRoot "Backups"
 $Script:LogRoot    = Join-Path $Script:DataRoot "Logs"
@@ -83,6 +73,21 @@ New-Item -Path $Script:BackupRoot -ItemType Directory -Force | Out-Null
 New-Item -Path $Script:LogRoot    -ItemType Directory -Force | Out-Null
 
 "[$($Script:AppName) v$($Script:AppVersion)] Session started: $(Get-Date)" | Set-Content -Path $Script:SessionLog -Encoding UTF8
+
+# StackPoint IT Color Palette
+$Script:Colors = @{
+    BgPrimary   = [System.Drawing.Color]::FromArgb(24,  25,  27)   # #18191b - outermost bg
+    BgSurface   = [System.Drawing.Color]::FromArgb(63,  67,  71)   # #3f4347 - panels / tabs
+    BgMid       = [System.Drawing.Color]::FromArgb(78,  84,  87)   # #4e5457 - inputs / secondary
+    BluePrimary = [System.Drawing.Color]::FromArgb(0,   98,  154)  # #00629a - primary buttons
+    BlueAccent  = [System.Drawing.Color]::FromArgb(7,   130, 201)  # #0782c9 - hover / highlight
+    TextPrimary = [System.Drawing.Color]::White
+    TextMuted   = [System.Drawing.Color]::FromArgb(160, 170, 180)  # #a0aab4
+    Success     = [System.Drawing.Color]::FromArgb(39,  174, 96)   # #27ae60
+    Danger      = [System.Drawing.Color]::FromArgb(192, 57,  43)   # #c0392b
+    Warning     = [System.Drawing.Color]::Gold
+    OutputBg    = [System.Drawing.Color]::FromArgb(24,  25,  27)   # same as BgPrimary
+}
 
 #------------------------------------------------------------------------------------------------
 # 4) UI-safe Logging Helpers
@@ -133,7 +138,7 @@ function Invoke-ProcessLogged {
         [Parameter(Mandatory=$true)][System.Windows.Forms.RichTextBox]$OutputBox,
         [Parameter(Mandatory=$true)][System.Windows.Forms.ToolStripStatusLabel]$StatusLabel
     )
-    Write-Log -Message "$($Title): starting..." -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+    Write-Log -Message "$($Title): starting..." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName               = $FilePath
@@ -152,11 +157,11 @@ function Invoke-ProcessLogged {
         try {
             while (-not $p.StandardOutput.EndOfStream) {
                 $l = $p.StandardOutput.ReadLine()
-                if ($null -ne $l -and $l.Trim().Length -gt 0) { Write-Log -Message $l -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
+                if ($null -ne $l -and $l.Trim().Length -gt 0) { Write-Log -Message $l -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
             }
             while (-not $p.StandardError.EndOfStream) {
                 $el = $p.StandardError.ReadLine()
-                if ($null -ne $el -and $el.Trim().Length -gt 0) { Write-Log -Message $el -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel }
+                if ($null -ne $el -and $el.Trim().Length -gt 0) { Write-Log -Message $el -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel }
             }
         } catch { }
         if ($Script:ApplyRun -and $Script:ApplyRun.CancelRequested) { try { $p.Kill() } catch { }; throw "Cancelled." }
@@ -165,11 +170,11 @@ function Invoke-ProcessLogged {
     }
 
     try {
-        while (-not $p.StandardOutput.EndOfStream) { $l = $p.StandardOutput.ReadLine(); if ($null -ne $l -and $l.Trim().Length -gt 0) { Write-Log -Message $l -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel } }
-        while (-not $p.StandardError.EndOfStream)  { $el = $p.StandardError.ReadLine(); if ($null -ne $el -and $el.Trim().Length -gt 0) { Write-Log -Message $el -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel } }
+        while (-not $p.StandardOutput.EndOfStream) { $l = $p.StandardOutput.ReadLine(); if ($null -ne $l -and $l.Trim().Length -gt 0) { Write-Log -Message $l -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel } }
+        while (-not $p.StandardError.EndOfStream)  { $el = $p.StandardError.ReadLine(); if ($null -ne $el -and $el.Trim().Length -gt 0) { Write-Log -Message $el -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel } }
     } catch { }
 
-    Write-Log -Message "$($Title): completed (exit code $($p.ExitCode))." -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel
+    Write-Log -Message "$($Title): completed (exit code $($p.ExitCode))." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
     return $p.ExitCode
 }
 
@@ -405,13 +410,13 @@ function Load-LastBackupPath {
 function Restore-FromManifest {
     param([Parameter(Mandatory=$true)][string]$ManifestPath,[Parameter(Mandatory=$true)][System.Windows.Forms.RichTextBox]$OutputBox,[System.Windows.Forms.ToolStripStatusLabel]$StatusLabel=$null)
     $m = Get-Content -Path $ManifestPath -Raw | ConvertFrom-Json
-    Write-Log -Message "Restoring from: $ManifestPath" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+    Write-Log -Message "Restoring from: $ManifestPath" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
     foreach ($kv in $m.BackupCtx.Registry.PSObject.Properties) { Restore-RegValue  -Record $kv.Value }
     foreach ($kv in $m.BackupCtx.Services.PSObject.Properties) { Restore-Service   -Record $kv.Value }
     foreach ($kv in $m.BackupCtx.Tasks.PSObject.Properties)    { Restore-Task      -Record $kv.Value }
     foreach ($kv in $m.BackupCtx.Files.PSObject.Properties)    { Restore-FileRecord -Record $kv.Value }
     foreach ($kv in $m.BackupCtx.Features.PSObject.Properties) { Restore-Feature   -Record $kv.Value }
-    Write-Log -Message "Restore complete. A reboot may be required." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    Write-Log -Message "Restore complete. A reboot may be required." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
 }
 
 #------------------------------------------------------------------------------------------------
@@ -429,7 +434,7 @@ function Set-RegValue {
     )
     Backup-RegValue -Ctx $BackupCtx -Path $Path -Name $Name
     Set-RegValueSafe -Path $Path -Name $Name -Value $Value -Type $Type
-    if ($OutputBox) { Write-Log -Message "Registry set: $Path [$Name] = $Value ($Type)" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel }
+    if ($OutputBox) { Write-Log -Message "Registry set: $Path [$Name] = $Value ($Type)" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
 }
 
 function Set-ServiceStartup {
@@ -442,29 +447,29 @@ function Set-ServiceStartup {
     )
     Backup-Service -Ctx $BackupCtx -Name $Name
     if (-not (Get-Service -Name $Name -ErrorAction SilentlyContinue)) {
-        Write-Log -Message "Service not found: $Name (skipping)" -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
+        Write-Log -Message "Service not found: $Name (skipping)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         return
     }
     Set-ServiceStartupTypeSafe -Name $Name -StartupType $StartupType
-    Write-Log -Message "Service startup set: $Name -> $StartupType" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    Write-Log -Message "Service startup set: $Name -> $StartupType" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
 }
 
 function Disable-ScheduledTaskSafe {
     param([Parameter(Mandatory=$true)][hashtable]$BackupCtx,[Parameter(Mandatory=$true)][string]$FullName,[System.Windows.Forms.RichTextBox]$OutputBox,[System.Windows.Forms.ToolStripStatusLabel]$StatusLabel)
     Backup-Task -Ctx $BackupCtx -FullName $FullName
     Disable-TaskRobust -FullName $FullName
-    Write-Log -Message "Task disabled: $FullName" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    Write-Log -Message "Task disabled: $FullName" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
 }
 
 function Disable-OptionalFeatureSafe {
     param([Parameter(Mandatory=$true)][hashtable]$BackupCtx,[Parameter(Mandatory=$true)][string]$Name,[System.Windows.Forms.RichTextBox]$OutputBox,[System.Windows.Forms.ToolStripStatusLabel]$StatusLabel)
     Backup-Feature -Ctx $BackupCtx -Name $Name
     $info = Get-OptionalFeatureStateSafe -Name $Name
-    if (-not $info.Exists) { Write-Log -Message "Optional feature not present: $Name (skipping)" -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel; return }
-    Write-Log -Message "DISM: Disabling optional feature $Name" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
+    if (-not $info.Exists) { Write-Log -Message "Optional feature not present: $Name (skipping)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel; return }
+    Write-Log -Message "DISM: Disabling optional feature $Name" -OutputBox $OutputBox -Color $Script:Colors.BlueAccent -StatusLabel $StatusLabel
     $p = Start-Process -FilePath "DISM.exe" -ArgumentList @("/Online","/Disable-Feature","/FeatureName:$Name","/NoRestart") -Wait -PassThru -WindowStyle Hidden
     if ($p.ExitCode -notin 0,3010) { throw "DISM failed disabling $Name (ExitCode=$($p.ExitCode))" }
-    Write-Log -Message "Feature disabled: $Name (ExitCode=$($p.ExitCode))" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+    Write-Log -Message "Feature disabled: $Name (ExitCode=$($p.ExitCode))" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
 }
 
 #------------------------------------------------------------------------------------------------
@@ -480,7 +485,7 @@ function Write-DiskDelta {
     if ($null -ne $Before -and $null -ne $after) {
         $freed = [math]::Round($after - $Before, 2)
         $msg = if ($freed -gt 0) { "Disk space freed: +$freed GB (C: now $after GB free)" } else { "Disk space change: $freed GB (C: now $after GB free)" }
-        Write-Log -Message $msg -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
+        Write-Log -Message $msg -OutputBox $OutputBox -Color $Script:Colors.BlueAccent -StatusLabel $StatusLabel
     }
 }
 
@@ -492,7 +497,7 @@ function Suspend-OneDrive {
     $od = "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe"
     if (Test-Path -LiteralPath $od) {
         try { Start-Process -FilePath $od -ArgumentList "/pause" -ErrorAction SilentlyContinue | Out-Null; Start-Sleep -Milliseconds 500 } catch { }
-        Write-Log -Message "OneDrive sync paused." -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
+        Write-Log -Message "OneDrive sync paused." -OutputBox $OutputBox -Color $Script:Colors.BlueAccent -StatusLabel $StatusLabel
     }
 }
 
@@ -501,7 +506,7 @@ function Resume-OneDrive {
     $od = "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe"
     if (Test-Path -LiteralPath $od) {
         try { Start-Process -FilePath $od -ArgumentList "/resume" -ErrorAction SilentlyContinue | Out-Null } catch { }
-        Write-Log -Message "OneDrive sync resumed." -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
+        Write-Log -Message "OneDrive sync resumed." -OutputBox $OutputBox -Color $Script:Colors.BlueAccent -StatusLabel $StatusLabel
     }
 }
 
@@ -550,7 +555,7 @@ $Script:Tweaks += New-Tweak `
     } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Disable Activity History ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Disable Activity History ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $p="HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
         Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "EnableActivityFeed"    -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "PublishUserActivities" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
@@ -568,7 +573,7 @@ $Script:Tweaks += New-Tweak `
     } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Disable Game DVR ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Disable Game DVR ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\System\GameConfigStore" -Name "GameDVR_Enabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" -Name "AllowGameDVR" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
     } `
@@ -602,9 +607,8 @@ $Script:Tweaks += New-Tweak `
     } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Reduce Background Apps (Safelist: M365, Adobe, RingCentral) ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Reduce Background Apps (Safelist: M365, Adobe, RingCentral) ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
-
         $consumer = @(
             "Microsoft.BingNews","Microsoft.BingWeather","Microsoft.GetHelp","Microsoft.Getstarted",
             "Microsoft.MicrosoftSolitaireCollection","Microsoft.People","Microsoft.WindowsFeedbackHub",
@@ -615,15 +619,12 @@ $Script:Tweaks += New-Tweak `
         $allowPatterns = @("MSTeams","Teams","RingCentral","OneDrive","Outlook","Office","SharePoint","Adobe","Acrobat","MicrosoftEdge","Edge")
         $pkgs = @(Get-AppxPackage -ErrorAction SilentlyContinue)
         $changed = 0
-
         foreach ($p in $pkgs) {
             $pf   = [string]$p.PackageFamilyName
             $name = [string]$p.Name
             $isAllow = $false
             foreach ($pat in $allowPatterns) { if ($pf -like "*$pat*" -or $name -like "*$pat*") { $isAllow = $true; break } }
-
             if (-not $isAllow -and -not ($consumer -contains $name)) { continue }
-
             $k = "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications\$pf"
             if ($isAllow) {
                 Set-RegValue -BackupCtx $BackupCtx -Path $k -Name "Disabled"       -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
@@ -634,7 +635,7 @@ $Script:Tweaks += New-Tweak `
             }
             $changed++
         }
-        Write-Log -Message ("Background apps updated for {0} packages." -f $changed) -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+        Write-Log -Message ("Background apps updated for {0} packages." -f $changed) -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel
     } `
     -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
 
@@ -644,7 +645,7 @@ $Script:Tweaks += New-Tweak `
     -GetState { if (Compare-RegExpected "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" "01" 0) { "Applied" } else { "NotApplied" } } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Disable Storage Sense ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Disable Storage Sense ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" -Name "01" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
     } `
     -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
@@ -665,7 +666,7 @@ $Script:Tweaks += New-Tweak `
     } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Disable Ads/Spotlight/Tips ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Disable Ads/Spotlight/Tips ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo" -Name "DisabledByGroupPolicy" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableTailoredExperiencesWithDiagnosticData" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableSoftLanding" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
@@ -692,7 +693,7 @@ $Script:Tweaks += New-Tweak `
     } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Minimize Optional Diagnostics ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Minimize Optional Diagnostics ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection" -Name "AllowTelemetry" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowDeviceNameInTelemetry" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
@@ -719,7 +720,7 @@ $Script:Tweaks += New-Tweak `
     } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Optimize Visual Effects ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Optimize Visual Effects ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\Software\Microsoft\Windows\DWM" -Name "ColorPrevalence" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
@@ -734,13 +735,13 @@ $Script:Tweaks += New-Tweak `
     } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- High Performance Power Plan ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
-        try { & powercfg.exe -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c | Out-Null; Write-Log -Message "Power plan set to High Performance." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel }
-        catch { Write-Log -Message "Failed to change power plan." -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel }
+        Write-Log -Message "--- High Performance Power Plan ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
+        try { & powercfg.exe -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c | Out-Null; Write-Log -Message "Power plan set to High Performance." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+        catch { Write-Log -Message "Failed to change power plan." -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel }
     } `
     -Undo {
         param($ManifestPath,$OutputBox,$StatusLabel)
-        try { & powercfg.exe -setactive 381b4222-f694-41f0-9685-ff5bb260df2e | Out-Null; Write-Log -Message "Reverted to Balanced power plan." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel } catch { }
+        try { & powercfg.exe -setactive 381b4222-f694-41f0-9685-ff5bb260df2e | Out-Null; Write-Log -Message "Reverted to Balanced power plan." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel } catch { }
     }
 
 $Script:Tweaks += New-Tweak `
@@ -767,7 +768,7 @@ $Script:Tweaks += New-Tweak `
     } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Disable Telemetry Tasks ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Disable Telemetry Tasks ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $tasks = @(
             "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
             "\Microsoft\Windows\Application Experience\ProgramDataUpdater",
@@ -792,22 +793,20 @@ $Script:Tweaks += New-Tweak `
     -GetState { "N-A" } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Delete Temporary Files ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Delete Temporary Files ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $before = Get-DriveFreeGB
         Suspend-OneDrive -OutputBox $OutputBox -StatusLabel $StatusLabel
         $paths = @("C:\Windows\Temp", $env:TEMP)
         foreach ($p in $paths) {
-            Write-Log -Message "Cleaning: $p" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
+            Write-Log -Message "Cleaning: $p" -OutputBox $OutputBox -Color $Script:Colors.BlueAccent -StatusLabel $StatusLabel
             try { if (Test-Path -LiteralPath $p) { Get-ChildItem -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue } } catch { }
         }
         Resume-OneDrive -OutputBox $OutputBox -StatusLabel $StatusLabel
-        Write-Log -Message "Temp cleanup complete." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+        Write-Log -Message "Temp cleanup complete." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
         Write-DiskDelta -Before $before -OutputBox $OutputBox -StatusLabel $StatusLabel
     } `
-    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "No undo action for temp cleanup." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel }
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "No undo action for temp cleanup." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
 
-# Service toggles — wuauserv REMOVED to protect patch compliance.
-# RingCentral services explicitly excluded via safeguard list below.
 $serviceToggles = @(
     @{ Name="AJRouter";          Startup="Disabled" },
     @{ Name="ALG";               Startup="Manual" },
@@ -825,18 +824,11 @@ $serviceToggles = @(
     @{ Name="TapiSrv";           Startup="Manual" },
     @{ Name="tzautoupdate";      Startup="Disabled" },
     @{ Name="UevAgentService";   Startup="Disabled" }
-    # wuauserv intentionally excluded — managed by WSUS/Intune in enterprise environments
 )
 
 $Script:ServiceSafelist = @(
-    "wuauserv",          # Windows Update - managed by Intune/WSUS
-    "RingCentral",       # RingCentral core service
-    "RingCentralMeetings",
-    "MozillaMaintenance",
-    "AdobeUpdateService",
-    "AdobeARMservice",   # Adobe Acrobat update
-    "OneDrive",
-    "Teams"
+    "wuauserv","RingCentral","RingCentralMeetings","MozillaMaintenance",
+    "AdobeUpdateService","AdobeARMservice","OneDrive","Teams"
 )
 
 $Script:Tweaks += New-Tweak `
@@ -855,14 +847,14 @@ $Script:Tweaks += New-Tweak `
     } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Optimize Services ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Optimize Services ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         foreach ($s in $serviceToggles) {
             if ($Script:ServiceSafelist -contains $s.Name) {
-                Write-Log -Message "SKIPPED (safelisted): $($s.Name)" -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
+                Write-Log -Message "SKIPPED (safelisted): $($s.Name)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
                 continue
             }
             try { Set-ServiceStartup -BackupCtx $BackupCtx -Name $s.Name -StartupType $s.Startup -OutputBox $OutputBox -StatusLabel $StatusLabel }
-            catch { Write-Log -Message "Service change failed (non-fatal): $($s.Name) -> $($_.Exception.Message)" -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel }
+            catch { Write-Log -Message "Service change failed (non-fatal): $($s.Name) -> $($_.Exception.Message)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
         }
     } `
     -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
@@ -873,7 +865,7 @@ $Script:Tweaks += New-Tweak `
     -GetState { if (Compare-RegExpected "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" "TcpNoDelay" 1) { "Applied" } else { "NotApplied" } } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Network Optimizations ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Network Optimizations ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "TcpNoDelay" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         $ifRoot="HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
         if (Test-Path -LiteralPath $ifRoot) {
@@ -882,16 +874,15 @@ $Script:Tweaks += New-Tweak `
             }
         }
         try { & ipconfig.exe /flushdns | Out-Null } catch { }
-        Write-Log -Message "Network tweaks applied." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+        Write-Log -Message "Network tweaks applied." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
     } `
     -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
 
 $Script:Tweaks += New-Tweak `
     -Id "perf_vbs_disable" -Name "Disable VBS and Memory Integrity" -Category "Performance" -Risk "High" -RequiresReboot $true `
-    -Description "Disables Virtualization-Based Security for CPU/I/O gains. NOT recommended on Intune-enrolled or domain-joined machines — may trigger compliance violations. Use GPO for domain machines instead." `
+    -Description "Disables Virtualization-Based Security for CPU/I/O gains. NOT recommended on Intune-enrolled or domain-joined machines." `
     -IsAvailable {
-        $intuneEnrolled = $false
-        $domainJoined   = $false
+        $intuneEnrolled = $false; $domainJoined = $false
         try { $cs = Get-CimInstance -ClassName Win32_ComputerSystem; $domainJoined = ($cs.PartOfDomain -eq $true) } catch { }
         try {
             $mdmPath = "HKLM:\SOFTWARE\Microsoft\Enrollments"
@@ -912,62 +903,53 @@ $Script:Tweaks += New-Tweak `
     } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Disable VBS & Memory Integrity ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Disable VBS & Memory Integrity ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard" -Name "EnableVirtualizationBasedSecurity" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" -Name "Enabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
     } `
     -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
 
-# ---- NEW v4.1: Disable SysMain (Superfetch) ----
 $Script:Tweaks += New-Tweak `
     -Id "perf_sysmain" -Name "Disable SysMain / Superfetch (SSD Recommended)" -Category "Performance" -Risk "Low" `
-    -Description "Disables SysMain service. On SSDs this service provides no benefit and generates constant low-level I/O. Windows 25H2 re-enables it during in-place upgrade. Fully reversible." `
+    -Description "Disables SysMain service. On SSDs this service provides no benefit and generates constant low-level I/O." `
     -GetState {
         $info = Get-ServiceStartupInfo -Name "SysMain"
-        if (-not $info.Exists) { "N-A" }
-        elseif ($info.StartupType -eq "Disabled") { "Applied" }
-        else { "NotApplied" }
+        if (-not $info.Exists) { "N-A" } elseif ($info.StartupType -eq "Disabled") { "Applied" } else { "NotApplied" }
     } `
     -Apply {
         param($BackupCtx, $OutputBox, $StatusLabel)
-        Write-Log -Message "--- Disable SysMain (Superfetch) ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Disable SysMain (Superfetch) ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         try {
             $disk = Get-PhysicalDisk -ErrorAction SilentlyContinue | Where-Object { $_.MediaType -eq "SSD" } | Select-Object -First 1
-            if (-not $disk) {
-                Write-Log -Message "WARNING: No SSD detected. SysMain is beneficial on HDD — consider skipping." -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
-            } else {
-                Write-Log -Message "SSD detected: $($disk.FriendlyName). SysMain disable is appropriate." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
-            }
+            if (-not $disk) { Write-Log -Message "WARNING: No SSD detected. SysMain is beneficial on HDD." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
+            else { Write-Log -Message "SSD detected: $($disk.FriendlyName)." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
         } catch { }
         try { Stop-Service -Name "SysMain" -Force -ErrorAction SilentlyContinue } catch { }
         Set-ServiceStartup -BackupCtx $BackupCtx -Name "SysMain" -StartupType "Disabled" -OutputBox $OutputBox -StatusLabel $StatusLabel
     } `
     -Undo { param($ManifestPath, $OutputBox, $StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
 
-# ---- NEW v4.1: Limit Delivery Optimization ----
 $Script:Tweaks += New-Tweak `
     -Id "perf_delivery_opt" -Name "Limit Delivery Optimization (Disable P2P Seeding)" -Category "Performance" -Risk "Low" `
-    -Description "Sets Delivery Optimization to HTTP-only mode (no LAN/WAN peer-to-peer). Stops the post-25H2 background seeding churn. Updates still download from Microsoft CDN — compliance unaffected." `
+    -Description "Sets Delivery Optimization to HTTP-only mode. Stops background seeding churn. Updates still download from Microsoft CDN." `
     -GetState {
-        if (Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization" "DODownloadMode" 0) { "Applied" }
-        else { "NotApplied" }
+        if (Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization" "DODownloadMode" 0) { "Applied" } else { "NotApplied" }
     } `
     -Apply {
         param($BackupCtx, $OutputBox, $StatusLabel)
-        Write-Log -Message "--- Limit Delivery Optimization (No P2P) ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Limit Delivery Optimization (No P2P) ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $p = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"
-        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "DODownloadMode"        -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
-        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "DOMaxUploadBandwidth"  -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "DODownloadMode"       -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
+        Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "DOMaxUploadBandwidth" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SYSTEM\CurrentControlSet\Services\DoSvc" -Name "Start" -Value 4 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         try { Stop-Service -Name "DoSvc" -Force -ErrorAction SilentlyContinue } catch { }
-        Write-Log -Message "Delivery Optimization restricted to HTTP-only. P2P seeding disabled." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+        Write-Log -Message "Delivery Optimization restricted to HTTP-only. P2P seeding disabled." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
     } `
     -Undo { param($ManifestPath, $OutputBox, $StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
 
-# ---- NEW v4.1: Windows Search Indexer Scope Reduction ----
 $Script:Tweaks += New-Tweak `
     -Id "perf_search_indexer" -Name "Reduce Windows Search Indexer Scope" -Category "Performance" -Risk "Medium" `
-    -Description "Disables cloud/Cortana search extensions, restricts indexer to user folders, disables web results, and throttles indexer to low-priority I/O. Addresses post-25H2 full-rebuild disk storm. Search still works." `
+    -Description "Disables cloud/Cortana search extensions, restricts indexer to user folders, disables web results, and throttles indexer I/O." `
     -GetState {
         $a = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" "AllowCortana" 0
         $b = Compare-RegExpected "HKLM:\SOFTWARE\Microsoft\Windows Search\Gather\Windows\SystemIndex" "RespectPowerModes" 1
@@ -975,7 +957,7 @@ $Script:Tweaks += New-Tweak `
     } `
     -Apply {
         param($BackupCtx, $OutputBox, $StatusLabel)
-        Write-Log -Message "--- Reduce Windows Search Indexer Scope ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Reduce Windows Search Indexer Scope ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $pSearch = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"
         $pGather = "HKLM:\SOFTWARE\Microsoft\Windows Search\Gather\Windows\SystemIndex"
         Set-RegValue -BackupCtx $BackupCtx -Path $pSearch -Name "AllowCortana"           -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
@@ -985,22 +967,14 @@ $Script:Tweaks += New-Tweak `
         Set-RegValue -BackupCtx $BackupCtx -Path $pSearch -Name "PreventIndexingOutlook" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path $pGather -Name "RespectPowerModes"      -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path $pGather -Name "UseLocalGatherer"       -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
-        try {
-            Stop-Service -Name "WSearch" -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 800
-            Start-Service -Name "WSearch" -ErrorAction SilentlyContinue
-            Write-Log -Message "Search indexer restarted at lower priority." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
-        } catch { }
-        Write-Log -Message "Windows Search scope reduced. Indexer will rebuild at low I/O priority." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+        try { Stop-Service -Name "WSearch" -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 800; Start-Service -Name "WSearch" -ErrorAction SilentlyContinue } catch { }
+        Write-Log -Message "Windows Search scope reduced." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
     } `
     -Undo { param($ManifestPath, $OutputBox, $StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
 
-# ---- NEW v4.1: Disable Copilot, Widgets, AI Tasks (25H2) ----
 $Script:Tweaks += New-Tweak `
-    -Id "perf_copilot_widgets" `
-    -Name "Disable Copilot, AI Tasks, and Taskbar Widgets (25H2)" `
-    -Category "Performance" -Risk "Low" `
-    -Description "Disables Windows Copilot sidebar, Widgets/News feed, taskbar Chat button, and 25H2 Recall/AI scheduled tasks. Policy keys are safe on all 25H2 hardware — tasks simply skip gracefully if Copilot+ features are absent." `
+    -Id "perf_copilot_widgets" -Name "Disable Copilot, AI Tasks, and Taskbar Widgets (25H2)" -Category "Performance" -Risk "Low" `
+    -Description "Disables Windows Copilot sidebar, Widgets/News feed, taskbar Chat, and 25H2 Recall/AI scheduled tasks." `
     -GetState {
         $a = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot" "TurnOffWindowsCopilot" 1
         $b = Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" "AllowNewsAndInterests" 0
@@ -1008,7 +982,7 @@ $Script:Tweaks += New-Tweak `
     } `
     -Apply {
         param($BackupCtx, $OutputBox, $StatusLabel)
-        Write-Log -Message "--- Disable Copilot / AI Tasks / Widgets ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Disable Copilot / AI Tasks / Widgets ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot" -Name "TurnOffWindowsCopilot" -Value 1 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowCopilotButton" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" -Name "AllowNewsAndInterests" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
@@ -1025,41 +999,35 @@ $Script:Tweaks += New-Tweak `
         )
         foreach ($task in $aiTasks) {
             try { Disable-ScheduledTaskSafe -BackupCtx $BackupCtx -FullName $task -OutputBox $OutputBox -StatusLabel $StatusLabel }
-            catch { Write-Log -Message "Task not present on this hardware (expected): $task" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
+            catch { Write-Log -Message "Task not present on this hardware (expected): $task" -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
         }
-        Write-Log -Message "Copilot/AI/Widgets disabled. Restart required for all changes." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+        Write-Log -Message "Copilot/AI/Widgets disabled. Restart required." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
     } `
     -Undo { param($ManifestPath, $OutputBox, $StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
 
-# ---- NEW v4.1: Disable Hibernate + Fast Startup ----
 $Script:Tweaks += New-Tweak `
-    -Id "perf_hibernate" -Name "Disable Hibernate and Fast Startup (Reclaims ~8-16 GB)" -Category "Performance" `
-    -Risk "Low" -RequiresReboot $true `
-    -Description "Runs 'powercfg /h off' to delete hiberfile.sys (~8-16 GB on 16 GB machines) and disables Fast Startup. Fast Startup causes stale driver state after major upgrades — disabling it forces a clean cold boot every time. Security benefit: full kernel re-init on each shutdown." `
+    -Id "perf_hibernate" -Name "Disable Hibernate and Fast Startup (Reclaims ~8-16 GB)" -Category "Performance" -Risk "Low" -RequiresReboot $true `
+    -Description "Runs 'powercfg /h off' to delete hiberfile.sys and disables Fast Startup. Security benefit: full kernel re-init on each shutdown." `
     -GetState {
         $hib = Get-RegValueInfo -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled"
         if ($hib.ExistsValue -and [int]$hib.Value -eq 0) { "Applied" } else { "NotApplied" }
     } `
     -Apply {
         param($BackupCtx, $OutputBox, $StatusLabel)
-        Write-Log -Message "--- Disable Hibernate + Fast Startup ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Disable Hibernate + Fast Startup ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $before = Get-DriveFreeGB
-        try {
-            & powercfg.exe /hibernate off 2>&1 | Out-Null
-            Write-Log -Message "Hibernate disabled. hiberfile.sys removed." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
-        } catch {
-            Write-Log -Message "powercfg /hibernate off failed: $($_.Exception.Message)" -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel
-        }
+        try { & powercfg.exe /hibernate off 2>&1 | Out-Null; Write-Log -Message "Hibernate disabled. hiberfile.sys removed." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+        catch { Write-Log -Message "powercfg /hibernate off failed: $($_.Exception.Message)" -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel }
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "HiberbootEnabled" -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Write-DiskDelta -Before $before -OutputBox $OutputBox -StatusLabel $StatusLabel
-        Write-Log -Message "Fast Startup disabled. Machine will perform full cold boot on every shutdown." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+        Write-Log -Message "Fast Startup disabled. Machine will cold boot on every shutdown." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
     } `
     -Undo {
         param($ManifestPath, $OutputBox, $StatusLabel)
         Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel
         try { & powercfg.exe /hibernate on 2>&1 | Out-Null } catch { }
-        Write-Log -Message "Hibernate re-enabled. hiberfile.sys will be recreated on next sleep." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+        Write-Log -Message "Hibernate re-enabled." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
     }
 
 #==== DEBLOAT ====
@@ -1070,7 +1038,7 @@ $Script:Tweaks += New-Tweak `
     -GetState { if (Compare-RegExpected "HKLM:\SOFTWARE\Policies\Microsoft\Edge" "HideFirstRunExperience" 1) { "Applied" } else { "NotApplied" } } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Debloat Edge ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Debloat Edge ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $p="HKLM:\SOFTWARE\Policies\Microsoft\Edge"
         Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "PersonalizationReportingEnabled"  -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
         Set-RegValue -BackupCtx $BackupCtx -Path $p -Name "ShowRecommendationsEnabled"        -Value 0 -Type DWord -OutputBox $OutputBox -StatusLabel $StatusLabel
@@ -1091,11 +1059,11 @@ $Script:Tweaks += New-Tweak `
     -GetState { "N-A" } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- DISM RestoreHealth ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- DISM RestoreHealth ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $code = Invoke-ProcessLogged -FilePath "DISM.exe" -Arguments "/Online /Cleanup-Image /RestoreHealth" -Title "DISM RestoreHealth" -OutputBox $OutputBox -StatusLabel $StatusLabel
         if ($code -ne 0 -and $code -ne 3010) { throw "DISM RestoreHealth returned exit code $code." }
     } `
-    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "DISM has no undo." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "DISM has no undo." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
 
 $Script:Tweaks += New-Tweak `
     -Id "maint_sfc_scannow" -Name "SFC: System File Checker Scan" -Category "Maintenance" -Risk "Low" `
@@ -1103,19 +1071,19 @@ $Script:Tweaks += New-Tweak `
     -GetState { "N-A" } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- SFC /scannow ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- SFC /scannow ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $code = Invoke-ProcessLogged -FilePath "sfc.exe" -Arguments "/scannow" -Title "SFC Scan" -OutputBox $OutputBox -StatusLabel $StatusLabel
         if ($code -ne 0) { throw "SFC returned exit code $code." }
     } `
-    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "SFC has no undo." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "SFC has no undo." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
 
 $Script:Tweaks += New-Tweak `
     -Id "maint_clear_teams_cache" -Name "Clear Microsoft Teams Cache" -Category "Maintenance" -Risk "Low" `
-    -Description "Stops Teams (classic + new), clears all cache folders including Service Worker and Network State for the current user." `
+    -Description "Stops Teams (classic + new), clears all cache folders including Service Worker and Network State." `
     -GetState { "N-A" } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Clear Teams Cache ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Clear Teams Cache ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $before = Get-DriveFreeGB
         $procNames = @("Teams","ms-teams","Update","TeamsUpdater","MSTeams")
         foreach ($p in $procNames) { try { Stop-Process -Name $p -Force -ErrorAction SilentlyContinue } catch { } }
@@ -1126,83 +1094,62 @@ $Script:Tweaks += New-Tweak `
             (Join-Path $env:LOCALAPPDATA "Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Roaming\Microsoft\Teams"),
             (Join-Path $env:LOCALAPPDATA "Microsoft\Teams")
         )
-        $targets = @(
-            "application cache","blob_storage","Cache","Code Cache","databases",
-            "GPUCache","IndexedDB","Local Storage","tmp","Logs",
-            "Service Worker","Network Persistent State","VideoCaptures","avatars cache"
-        )
+        $targets = @("application cache","blob_storage","Cache","Code Cache","databases","GPUCache","IndexedDB","Local Storage","tmp","Logs","Service Worker","Network Persistent State","VideoCaptures","avatars cache")
         foreach ($root in $paths | Where-Object { $_ -and (Test-Path -LiteralPath $_) }) {
             foreach ($t in $targets) {
                 $fp = Join-Path $root $t
-                if (Test-Path -LiteralPath $fp) {
-                    try { Remove-Item -LiteralPath $fp -Recurse -Force -ErrorAction SilentlyContinue } catch { }
-                }
+                if (Test-Path -LiteralPath $fp) { try { Remove-Item -LiteralPath $fp -Recurse -Force -ErrorAction SilentlyContinue } catch { } }
             }
         }
-        Write-Log -Message "Teams cache cleared. Start Teams again to rebuild cache." -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel
+        Write-Log -Message "Teams cache cleared." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
         Write-DiskDelta -Before $before -OutputBox $OutputBox -StatusLabel $StatusLabel
     } `
-    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "Teams cache clearing is not reversible." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "Teams cache clearing is not reversible." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
 
 $Script:Tweaks += New-Tweak `
     -Id "maint_clear_outlook_temp" -Name "Clear Outlook Secure Temp Attachments" -Category "Maintenance" -Risk "Low" `
-    -Description "Clears OutlookSecureTempFolder and Content.Outlook cache paths for all detected Office versions for the current user." `
+    -Description "Clears OutlookSecureTempFolder and Content.Outlook cache paths for all detected Office versions." `
     -GetState { "N-A" } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Clear Outlook Temp Attachments ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Clear Outlook Temp Attachments ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $before = Get-DriveFreeGB
-        $versions = @("16.0","15.0","14.0")
-        $folders  = @()
+        $versions = @("16.0","15.0","14.0"); $folders = @()
         foreach ($v in $versions) {
-            $key = "HKCU:\Software\Microsoft\Office\$v\Outlook\Security"
-            try {
-                $info = Get-RegValueInfo -Path $key -Name "OutlookSecureTempFolder"
-                if ($info.ExistsValue -and $info.Value) { $folders += [string]$info.Value }
-            } catch { }
+            try { $info = Get-RegValueInfo -Path "HKCU:\Software\Microsoft\Office\$v\Outlook\Security" -Name "OutlookSecureTempFolder"; if ($info.ExistsValue -and $info.Value) { $folders += [string]$info.Value } } catch { }
         }
         $folders += (Join-Path $env:LOCALAPPDATA "Microsoft\Windows\INetCache\Content.Outlook")
         $folders = $folders | Where-Object { $_ -and $_.Trim().Length -gt 0 } | Select-Object -Unique
         foreach ($f in $folders) {
-            if (Test-Path -LiteralPath $f) {
-                try { Get-ChildItem -LiteralPath $f -Force -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue } } catch { }
-            }
+            if (Test-Path -LiteralPath $f) { try { Get-ChildItem -LiteralPath $f -Force -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue } } catch { } }
         }
-        Write-Log -Message "Outlook temp attachment cache cleared." -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel
+        Write-Log -Message "Outlook temp attachment cache cleared." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
         Write-DiskDelta -Before $before -OutputBox $OutputBox -StatusLabel $StatusLabel
     } `
-    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "Outlook temp cache clearing is not reversible." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "Outlook temp cache clearing is not reversible." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
 
 $Script:Tweaks += New-Tweak `
     -Id "maint_clear_edge_cache" -Name "Clear Microsoft Edge Browser Cache" -Category "Maintenance" -Risk "Low" `
-    -Description "Kills Edge, clears Cache, Code Cache, GPUCache, and IndexedDB for the current user profile. Tabs and history are preserved." `
+    -Description "Kills Edge, clears Cache, Code Cache, GPUCache, and IndexedDB. Tabs and history are preserved." `
     -GetState { "N-A" } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Clear Edge Browser Cache ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Clear Edge Browser Cache ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $before = Get-DriveFreeGB
         try { Stop-Process -Name "msedge" -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 1500 } catch { }
         $profileBase = Join-Path $env:LOCALAPPDATA "Microsoft\Edge\User Data"
-        if (-not (Test-Path -LiteralPath $profileBase)) {
-            Write-Log -Message "Edge profile directory not found. Skipping." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
-            return
-        }
+        if (-not (Test-Path -LiteralPath $profileBase)) { Write-Log -Message "Edge profile directory not found." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel; return }
         $profiles = @(Join-Path $profileBase "Default")
         $profiles += @(Get-ChildItem -Path $profileBase -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "^Profile \d+" } | ForEach-Object { $_.FullName })
         $cacheDirs = @("Cache","Code Cache","GPUCache","IndexedDB","Service Worker","Network Persistent State","blob_storage")
         foreach ($prof in $profiles | Where-Object { Test-Path -LiteralPath $_ }) {
-            Write-Log -Message "Clearing Edge profile: $(Split-Path -Leaf $prof)" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
-            foreach ($d in $cacheDirs) {
-                $fp = Join-Path $prof $d
-                if (Test-Path -LiteralPath $fp) {
-                    try { Remove-Item -LiteralPath $fp -Recurse -Force -ErrorAction SilentlyContinue } catch { }
-                }
-            }
+            Write-Log -Message "Clearing Edge profile: $(Split-Path -Leaf $prof)" -OutputBox $OutputBox -Color $Script:Colors.BlueAccent -StatusLabel $StatusLabel
+            foreach ($d in $cacheDirs) { $fp = Join-Path $prof $d; if (Test-Path -LiteralPath $fp) { try { Remove-Item -LiteralPath $fp -Recurse -Force -ErrorAction SilentlyContinue } catch { } } }
         }
-        Write-Log -Message "Edge cache cleared. Edge will rebuild cache on next launch." -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel
+        Write-Log -Message "Edge cache cleared." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
         Write-DiskDelta -Before $before -OutputBox $OutputBox -StatusLabel $StatusLabel
     } `
-    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "Edge cache clearing is not reversible." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "Edge cache clearing is not reversible." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
 
 $Script:Tweaks += New-Tweak `
     -Id "maint_clear_adobe_cache" -Name "Clear Adobe Acrobat Cache" -Category "Maintenance" -Risk "Low" `
@@ -1210,13 +1157,12 @@ $Script:Tweaks += New-Tweak `
     -GetState { "N-A" } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Clear Adobe Acrobat Cache ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Clear Adobe Acrobat Cache ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $before = Get-DriveFreeGB
         $adobeProcs = @("Acrobat","AcroCEF","AcroRd32","AcroRd64","AdobeCollabSync")
         foreach ($p in $adobeProcs) { try { Stop-Process -Name $p -Force -ErrorAction SilentlyContinue } catch { } }
         Start-Sleep -Milliseconds 1000
-        $acrobatVersions = @("DC","2020","2017","2015","11.0")
-        $cleared = 0
+        $acrobatVersions = @("DC","2020","2017","2015","11.0"); $cleared = 0
         foreach ($ver in $acrobatVersions) {
             $cachePaths = @(
                 (Join-Path $env:APPDATA    "Adobe\Acrobat\$ver\Cache"),
@@ -1227,31 +1173,25 @@ $Script:Tweaks += New-Tweak `
             )
             foreach ($cp in $cachePaths) {
                 if (Test-Path -LiteralPath $cp) {
-                    try {
-                        Get-ChildItem -LiteralPath $cp -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-                        Write-Log -Message "Cleared: $cp" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
-                        $cleared++
-                    } catch { }
+                    try { Get-ChildItem -LiteralPath $cp -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue; Write-Log -Message "Cleared: $cp" -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel; $cleared++ } catch { }
                 }
             }
         }
         $sharedTemp = Join-Path $env:LOCALAPPDATA "Temp\Adobe Acrobat"
-        if (Test-Path -LiteralPath $sharedTemp) {
-            try { Remove-Item -LiteralPath $sharedTemp -Recurse -Force -ErrorAction SilentlyContinue; $cleared++ } catch { }
-        }
-        if ($cleared -eq 0) { Write-Log -Message "No Adobe Acrobat cache paths found for this user." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel }
-        else { Write-Log -Message "Adobe Acrobat cache cleared ($cleared paths)." -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel }
+        if (Test-Path -LiteralPath $sharedTemp) { try { Remove-Item -LiteralPath $sharedTemp -Recurse -Force -ErrorAction SilentlyContinue; $cleared++ } catch { } }
+        if ($cleared -eq 0) { Write-Log -Message "No Adobe Acrobat cache paths found." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
+        else { Write-Log -Message "Adobe Acrobat cache cleared ($cleared paths)." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
         Write-DiskDelta -Before $before -OutputBox $OutputBox -StatusLabel $StatusLabel
     } `
-    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "Adobe cache clearing is not reversible." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "Adobe cache clearing is not reversible." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
 
 $Script:Tweaks += New-Tweak `
     -Id "maint_clear_ringcentral_cache" -Name "Clear RingCentral Cache" -Category "Maintenance" -Risk "Low" `
-    -Description "Stops RingCentral and clears logs and cache for the current user. RingCentral will rebuild on next launch." `
+    -Description "Stops RingCentral and clears logs and cache for the current user." `
     -GetState { "N-A" } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- Clear RingCentral Cache ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- Clear RingCentral Cache ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $before = Get-DriveFreeGB
         $rcProcs = @("RingCentral","RingCentralMeetings","RCMeetings","RingCentralPhone")
         foreach ($p in $rcProcs) { try { Stop-Process -Name $p -Force -ErrorAction SilentlyContinue } catch { } }
@@ -1265,173 +1205,406 @@ $Script:Tweaks += New-Tweak `
         $rcCacheDirs = @("Cache","Code Cache","GPUCache","logs","Logs","blob_storage","IndexedDB","Service Worker","tmp")
         $cleared = 0
         foreach ($root in $rcPaths | Where-Object { Test-Path -LiteralPath $_ }) {
-            Write-Log -Message "Scanning: $root" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
-            foreach ($d in $rcCacheDirs) {
-                $fp = Join-Path $root $d
-                if (Test-Path -LiteralPath $fp) {
-                    try { Remove-Item -LiteralPath $fp -Recurse -Force -ErrorAction SilentlyContinue; $cleared++ } catch { }
-                }
-            }
+            Write-Log -Message "Scanning: $root" -OutputBox $OutputBox -Color $Script:Colors.BlueAccent -StatusLabel $StatusLabel
+            foreach ($d in $rcCacheDirs) { $fp = Join-Path $root $d; if (Test-Path -LiteralPath $fp) { try { Remove-Item -LiteralPath $fp -Recurse -Force -ErrorAction SilentlyContinue; $cleared++ } catch { } } }
         }
-        if ($cleared -eq 0) { Write-Log -Message "No RingCentral cache paths found for this user." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel }
-        else { Write-Log -Message "RingCentral cache cleared ($cleared paths)." -OutputBox $OutputBox -Color LightGreen -StatusLabel $StatusLabel }
+        if ($cleared -eq 0) { Write-Log -Message "No RingCentral cache paths found." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
+        else { Write-Log -Message "RingCentral cache cleared ($cleared paths)." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
         Write-DiskDelta -Before $before -OutputBox $OutputBox -StatusLabel $StatusLabel
     } `
-    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "RingCentral cache clearing is not reversible." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "RingCentral cache clearing is not reversible." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
 
 $Script:Tweaks += New-Tweak `
     -Id "maint_onedrive_health" -Name "OneDrive Sync Health Diagnostic" -Category "Maintenance" -Risk "Low" `
-    -Description "Read-only diagnostic: reports OneDrive sync status, account, and folder path to the log. Makes no changes." `
+    -Description "Read-only diagnostic: reports OneDrive sync status, account, and folder path. Makes no changes." `
     -GetState { "N-A" } `
     -Apply {
         param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- OneDrive Sync Health Diagnostic ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
+        Write-Log -Message "--- OneDrive Sync Health Diagnostic ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
         $odExe = "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe"
-        if (-not (Test-Path -LiteralPath $odExe)) {
-            Write-Log -Message "OneDrive executable not found at $odExe." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
-            return
-        }
+        if (-not (Test-Path -LiteralPath $odExe)) { Write-Log -Message "OneDrive executable not found." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel; return }
         $odProc = Get-Process -Name "OneDrive" -ErrorAction SilentlyContinue
-        if ($odProc) {
-            Write-Log -Message "OneDrive process: Running (PID $($odProc.Id))" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
-        } else {
-            Write-Log -Message "OneDrive process: NOT running." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
+        if ($odProc) { Write-Log -Message "OneDrive process: Running (PID $($odProc.Id))" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+        else { Write-Log -Message "OneDrive process: NOT running." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
+        try { $syncRoot = (Get-RegValueInfo -Path "HKCU:\Software\Microsoft\OneDrive\Accounts\Business1" -Name "UserFolder").Value; if ($syncRoot) { Write-Log -Message "OneDrive Business sync folder: $syncRoot" -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel } } catch { }
+        try { $personalRoot = (Get-RegValueInfo -Path "HKCU:\Software\Microsoft\OneDrive\Accounts\Personal" -Name "UserFolder").Value; if ($personalRoot) { Write-Log -Message "OneDrive Personal sync folder: $personalRoot" -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel } } catch { }
+        foreach ($k in @("HKCU:\Software\Microsoft\OneDrive\Accounts\Business1","HKCU:\Software\Microsoft\OneDrive\Accounts\Personal")) {
+            try { $email = (Get-RegValueInfo -Path $k -Name "UserEmail").Value; $lastSynced = (Get-RegValueInfo -Path $k -Name "LastSyncedTimestamp").Value; if ($email) { Write-Log -Message "Account: $email | Last synced: $lastSynced" -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel } } catch { }
         }
-        try {
-            $syncRoot = (Get-RegValueInfo -Path "HKCU:\Software\Microsoft\OneDrive\Accounts\Business1" -Name "UserFolder").Value
-            if ($syncRoot) { Write-Log -Message "OneDrive Business sync folder: $syncRoot" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
-        } catch { }
-        try {
-            $personalRoot = (Get-RegValueInfo -Path "HKCU:\Software\Microsoft\OneDrive\Accounts\Personal" -Name "UserFolder").Value
-            if ($personalRoot) { Write-Log -Message "OneDrive Personal sync folder: $personalRoot" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
-        } catch { }
-        $syncStatKeys = @(
-            "HKCU:\Software\Microsoft\OneDrive\Accounts\Business1",
-            "HKCU:\Software\Microsoft\OneDrive\Accounts\Personal"
-        )
-        foreach ($k in $syncStatKeys) {
-            try {
-                $email = (Get-RegValueInfo -Path $k -Name "UserEmail").Value
-                $lastSynced = (Get-RegValueInfo -Path $k -Name "LastSyncedTimestamp").Value
-                if ($email) { Write-Log -Message "Account: $email | Last synced: $lastSynced" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
-            } catch { }
-        }
-        try {
-            if ($syncRoot -and (Test-Path -LiteralPath $syncRoot)) {
-                $size = [math]::Round((Get-ChildItem -LiteralPath $syncRoot -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum / 1GB, 2)
-                Write-Log -Message "OneDrive local data size: $size GB" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
-            }
-        } catch { }
-        Write-Log -Message "OneDrive health diagnostic complete." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+        Write-Log -Message "OneDrive health diagnostic complete." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
     } `
-    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "Diagnostic only — no undo needed." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel }
+    -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Write-Log -Message "Diagnostic only — no undo needed." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
 
-# ---- NEW v4.1: DISM StartComponentCleanup (Post-Upgrade) ----
 $Script:Tweaks += New-Tweak `
-    -Id "maint_dism_cleanup" `
-    -Name "DISM: Post-Upgrade Component Cleanup — Frees 2-8 GB (IRREVERSIBLE)" `
-    -Category "Maintenance" -Risk "Medium" `
-    -Description "DISM /StartComponentCleanup /ResetBase permanently removes previous OS version files kept for the 25H2 rollback window. Typically frees 2-8 GB. WARNING: After this runs you cannot roll back to the prior Windows version. Only run after confirming 25H2 is stable. Takes 5-20 minutes." `
+    -Id "maint_dism_cleanup" -Name "DISM: Post-Upgrade Component Cleanup — Frees 2-8 GB (IRREVERSIBLE)" -Category "Maintenance" -Risk "Medium" `
+    -Description "DISM /StartComponentCleanup /ResetBase permanently removes previous OS version rollback files. WARNING: Cannot roll back after this runs." `
     -GetState { "N-A" } `
     -Apply {
         param($BackupCtx, $OutputBox, $StatusLabel)
-        Write-Log -Message "--- DISM Post-Upgrade Component Cleanup (/ResetBase) ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
-        Write-Log -Message "WARNING: This removes prior Windows version rollback files. This is PERMANENT." -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel
+        Write-Log -Message "--- DISM Post-Upgrade Component Cleanup (/ResetBase) ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
+        Write-Log -Message "WARNING: This removes prior Windows version rollback files. PERMANENT." -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel
         $before = Get-DriveFreeGB
-        $code = Invoke-ProcessLogged `
-            -FilePath "DISM.exe" `
-            -Arguments "/Online /Cleanup-Image /StartComponentCleanup /ResetBase" `
-            -Title "DISM StartComponentCleanup" `
-            -OutputBox $OutputBox `
-            -StatusLabel $StatusLabel
+        $code = Invoke-ProcessLogged -FilePath "DISM.exe" -Arguments "/Online /Cleanup-Image /StartComponentCleanup /ResetBase" -Title "DISM StartComponentCleanup" -OutputBox $OutputBox -StatusLabel $StatusLabel
         if ($code -notin 0, 3010) { throw "DISM StartComponentCleanup returned exit code $code." }
         Write-DiskDelta -Before $before -OutputBox $OutputBox -StatusLabel $StatusLabel
-        Write-Log -Message "Component cleanup complete. Prior OS rollback capability removed." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+        Write-Log -Message "Component cleanup complete. Prior OS rollback capability removed." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
     } `
-    -Undo { param($ManifestPath, $OutputBox, $StatusLabel)
-        Write-Log -Message "Component cleanup is permanent — rollback files cannot be restored." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
-    }
+    -Undo { param($ManifestPath, $OutputBox, $StatusLabel) Write-Log -Message "Component cleanup is permanent — rollback files cannot be restored." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
 
-# ---- NEW v4.1: Intel/Dell Driver Diagnostic (Read-Only) ----
 $Script:Tweaks += New-Tweak `
-    -Id "maint_driver_diag" `
-    -Name "Intel/Dell Driver Diagnostic (Read-Only)" `
-    -Category "Maintenance" -Risk "Low" `
-    -Description "Read-only scan: checks Intel graphics driver version against OEM thresholds, reports BIOS version, model, storage driver health, and flags any PnP devices with errors. No changes made — results logged for review and Dell Command Update action." `
+    -Id "maint_driver_diag" -Name "Intel/Dell Driver Diagnostic (Read-Only)" -Category "Maintenance" -Risk "Low" `
+    -Description "Read-only scan: checks Intel graphics driver version, reports BIOS version, model, storage health, and PnP device errors. No changes." `
     -GetState { "N-A" } `
     -Apply {
         param($BackupCtx, $OutputBox, $StatusLabel)
-        Write-Log -Message "--- Intel/Dell Driver Diagnostic ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
-
-        # System model
-        try {
-            $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
-            Write-Log -Message "Model: $($cs.Manufacturer) $($cs.Model)" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
-        } catch { }
-
-        # BIOS
+        Write-Log -Message "--- Intel/Dell Driver Diagnostic ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
+        try { $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop; Write-Log -Message "Model: $($cs.Manufacturer) $($cs.Model)" -OutputBox $OutputBox -Color $Script:Colors.BlueAccent -StatusLabel $StatusLabel } catch { }
         try {
             $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction Stop
-            Write-Log -Message "BIOS: $($bios.Manufacturer) | Version: $($bios.SMBIOSBIOSVersion) | Date: $($bios.ReleaseDate)" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
-            if ($bios.Manufacturer -notmatch "Dell") {
-                Write-Log -Message "  NOTE: Non-Dell BIOS — verify machine identity." -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
-            }
+            Write-Log -Message "BIOS: $($bios.Manufacturer) | Version: $($bios.SMBIOSBIOSVersion) | Date: $($bios.ReleaseDate)" -OutputBox $OutputBox -Color $Script:Colors.BlueAccent -StatusLabel $StatusLabel
+            if ($bios.Manufacturer -notmatch "Dell") { Write-Log -Message "  NOTE: Non-Dell BIOS — verify machine identity." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
         } catch { }
-
-        # Intel display driver
         try {
             $gpuDrivers = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop | Where-Object { $_.Name -match "Intel" })
             if ($gpuDrivers.Count -gt 0) {
                 foreach ($gpu in $gpuDrivers) {
-                    Write-Log -Message "GPU: $($gpu.Name)" -OutputBox $OutputBox -Color Cyan -StatusLabel $StatusLabel
-                    Write-Log -Message "  Driver Version : $($gpu.DriverVersion)" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
-                    Write-Log -Message "  Driver Date    : $($gpu.DriverDate)" -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+                    Write-Log -Message "GPU: $($gpu.Name)" -OutputBox $OutputBox -Color $Script:Colors.BlueAccent -StatusLabel $StatusLabel
+                    Write-Log -Message "  Driver Version : $($gpu.DriverVersion)" -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel
                     $verParts = $gpu.DriverVersion -split "\."
                     if ($verParts.Count -ge 2) {
-                        $major = [int]$verParts[0]; $minor = [int]$verParts[1]
-                        # OEM Intel DCH drivers are 31.x+ as of 2025-2026
-                        if ($major -lt 31) {
-                            Write-Log -Message "  STATUS: INBOX/OUTDATED DRIVER (< 31.x)" -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel
-                            Write-Log -Message "  ACTION: Run Dell Command Update or install Intel DCH driver from intel.com/download" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
-                        } else {
-                            Write-Log -Message "  STATUS: Driver is current OEM range (31.x+)" -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
-                        }
+                        $major = [int]$verParts[0]
+                        if ($major -lt 31) { Write-Log -Message "  STATUS: INBOX/OUTDATED DRIVER (< 31.x) — Run Dell Command Update" -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel }
+                        else { Write-Log -Message "  STATUS: Driver is current OEM range (31.x+)" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
                     }
                 }
-            } else {
-                Write-Log -Message "No Intel GPU detected (may be AMD/NVIDIA discrete)." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
-            }
-        } catch {
-            Write-Log -Message "GPU driver query failed: $($_.Exception.Message)" -OutputBox $OutputBox -Color Yellow -StatusLabel $StatusLabel
-        }
-
-        # Storage devices
-        try {
-            $storDevices = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.Class -eq "DiskDrive" -or $_.Class -eq "SCSIAdapter" } | Select-Object -First 5)
-            foreach ($d in $storDevices) {
-                $statusColor = if ($d.Status -eq "OK") { [System.Drawing.Color]::Silver } else { [System.Drawing.Color]::Salmon }
-                Write-Log -Message "Storage: $($d.FriendlyName) | Status: $($d.Status)" -OutputBox $OutputBox -Color $statusColor -StatusLabel $StatusLabel
-            }
+            } else { Write-Log -Message "No Intel GPU detected." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
         } catch { }
-
-        # PnP error summary
         try {
             $problemDevices = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.Status -ne "OK" })
             if ($problemDevices.Count -gt 0) {
-                Write-Log -Message "--- Devices with errors ($($problemDevices.Count) found) ---" -OutputBox $OutputBox -Color Gold -StatusLabel $StatusLabel
-                foreach ($d in $problemDevices | Select-Object -First 10) {
-                    Write-Log -Message "  [$($d.Status)] $($d.FriendlyName) | Class: $($d.Class)" -OutputBox $OutputBox -Color Salmon -StatusLabel $StatusLabel
-                }
-            } else {
-                Write-Log -Message "No problem devices found in PnP device list." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
-            }
+                Write-Log -Message "--- Devices with errors ($($problemDevices.Count) found) ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
+                foreach ($d in $problemDevices | Select-Object -First 10) { Write-Log -Message "  [$($d.Status)] $($d.FriendlyName) | Class: $($d.Class)" -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel }
+            } else { Write-Log -Message "No problem devices found." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
         } catch { }
-
-        Write-Log -Message "Driver diagnostic complete. Review ACTION items above." -OutputBox $OutputBox -Color LimeGreen -StatusLabel $StatusLabel
+        Write-Log -Message "Driver diagnostic complete." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
     } `
-    -Undo { param($ManifestPath, $OutputBox, $StatusLabel)
-        Write-Log -Message "Diagnostic only — no undo needed." -OutputBox $OutputBox -Color Silver -StatusLabel $StatusLabel
+    -Undo { param($ManifestPath, $OutputBox, $StatusLabel) Write-Log -Message "Diagnostic only — no undo needed." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
+
+#------------------------------------------------------------------------------------------------
+# 10.5) Uninstaller — App Catalog & Deep Clean
+#------------------------------------------------------------------------------------------------
+
+# Patterns excluded from the uninstall list (system components, runtimes, drivers, updates)
+$Script:UninstallExcludePatterns = @(
+    "^Microsoft Visual C\+\+",
+    "Microsoft \.NET",
+    "\.NET Runtime",
+    "\.NET Desktop Runtime",
+    "ASP\.NET Core",
+    "Windows SDK",
+    "Windows Driver",
+    "Windows Update",
+    "Security Update for",
+    "Update for Windows",
+    "Hotfix for",
+    "KB\d{6,7}",
+    "^DirectX",
+    "MSXML \d",
+    "^WMI ",
+    "Microsoft Application Error Reporting",
+    "Microsoft Web Deploy",
+    "Microsoft Report Viewer",
+    "Microsoft MPI",
+    "Microsoft Policy Platform",
+    "Microsoft Primary Interop",
+    "Microsoft SQL Server \d{4} .*(Native|Express|Compact)",
+    "Intel.*Driver",
+    "Intel.*Software",
+    "Realtek.*Driver",
+    "AMD.*Driver",
+    "NVIDIA.*Driver",
+    "Dell Update",
+    "Dell Command",
+    "Dell SupportAssist OS Recovery",
+    "Bonjour",
+    "Apple Software Update",
+    "VMware Tools",
+    "VirtualBox Guest Additions"
+)
+
+$Script:AllInstalledApps = @()
+$Script:UninstDiag     = @{}
+
+function Get-InstalledApps {
+    # Use Get-ChildItem to enumerate subkeys, then Get-ItemProperty -LiteralPath per key.
+    # Get-ItemProperty with a wildcard path returns PSObjects where missing registry values
+    # throw on property access under Set-StrictMode -Version Latest, aborting entire hives.
+    # The per-key approach isolates every entry so one bad key never kills the scan.
+    $hivePaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    )
+
+    $seen    = @{}
+    $results = New-Object System.Collections.Generic.List[object]
+    $Script:UninstDiag = @{ HiveCounts = @{}; Added = 0; Skipped = 0 }
+
+    foreach ($hivePath in $hivePaths) {
+        $hiveLabel = if ($hivePath -match 'WOW6432') { 'HKLM-32' } elseif ($hivePath -match 'HKCU') { 'HKCU' } else { 'HKLM-64' }
+
+        if (-not (Test-Path -LiteralPath $hivePath -ErrorAction SilentlyContinue)) {
+            $Script:UninstDiag.HiveCounts[$hiveLabel] = 'path not found'
+            continue
+        }
+
+        $subkeys = $null
+        try { $subkeys = @(Get-ChildItem -LiteralPath $hivePath -ErrorAction SilentlyContinue) } catch { $Script:UninstDiag.HiveCounts[$hiveLabel] = "enum error: $($_.Exception.Message)"; continue }
+        if (-not $subkeys -or $subkeys.Count -eq 0) { $Script:UninstDiag.HiveCounts[$hiveLabel] = '0 subkeys'; continue }
+
+        $hiveAdded = 0; $hiveSkipped = 0
+
+        foreach ($subkey in $subkeys) {
+            try {
+                $props = $null
+                try { $props = Get-ItemProperty -LiteralPath $subkey.PSPath -ErrorAction SilentlyContinue } catch { $hiveSkipped++; continue }
+                if ($null -eq $props) { $hiveSkipped++; continue }
+
+                # DisplayName — required
+                $displayName = $null
+                try { $displayName = $props.DisplayName } catch { }
+                if ($null -eq $displayName -or $displayName.ToString().Trim() -eq '') { $hiveSkipped++; continue }
+                $displayName = $displayName.ToString().Trim()
+
+                # UninstallString — required
+                $uninstallString = $null
+                try { $uninstallString = $props.UninstallString } catch { }
+                if ($null -eq $uninstallString -or $uninstallString.ToString().Trim() -eq '') { $hiveSkipped++; continue }
+                $uninstallString = $uninstallString.ToString().Trim()
+
+                # SystemComponent = 1 → OS component, skip
+                $sysComp = 0
+                try { if ($null -ne $props.SystemComponent) { $sysComp = [int]$props.SystemComponent } } catch { }
+                if ($sysComp -eq 1) { $hiveSkipped++; continue }
+
+                # ReleaseType update/hotfix → skip
+                $releaseType = ''
+                try { if ($null -ne $props.ReleaseType) { $releaseType = $props.ReleaseType.ToString() } } catch { }
+                if ($releaseType -match 'Update|Hotfix|Security') { $hiveSkipped++; continue }
+
+                # Name itself looks like a KB / update entry → skip
+                if ($displayName -match '^(KB\d|Security Update|Hotfix|Update for |Service Pack)') { $hiveSkipped++; continue }
+
+                # Dedup
+                $dedupeKey = $displayName.ToLower()
+                if ($seen.ContainsKey($dedupeKey)) { $hiveSkipped++; continue }
+
+                # Exclusion pattern list
+                $excluded = $false
+                foreach ($pat in $Script:UninstallExcludePatterns) {
+                    try { if ($displayName -match $pat) { $excluded = $true; break } } catch { }
+                }
+                if ($excluded) { $hiveSkipped++; continue }
+
+                $seen[$dedupeKey] = $true
+
+                # Optional fields
+                $publisher = '';       try { if ($null -ne $props.Publisher)           { $publisher       = $props.Publisher.ToString().Trim()           } } catch { }
+                $version   = '';       try { if ($null -ne $props.DisplayVersion)      { $version         = $props.DisplayVersion.ToString().Trim()      } } catch { }
+                $quietUn   = '';       try { if ($null -ne $props.QuietUninstallString){ $quietUn          = $props.QuietUninstallString.ToString().Trim() } } catch { }
+                $instLoc   = '';       try { if ($null -ne $props.InstallLocation)     { $instLoc         = $props.InstallLocation.ToString().Trim()     } } catch { }
+
+                $sizeKB = 0; try { if ($null -ne $props.EstimatedSize) { $sizeKB = [int]$props.EstimatedSize } } catch { }
+                $sizeStr = if ($sizeKB -ge 1048576) { "$([math]::Round($sizeKB/1048576,1)) GB" }
+                           elseif ($sizeKB -ge 1024)  { "$([math]::Round($sizeKB/1024,0)) MB"  }
+                           elseif ($sizeKB -gt 0)      { "$sizeKB KB" }
+                           else                         { "" }
+
+                $installDate = ''
+                try {
+                    if ($null -ne $props.InstallDate) {
+                        $rawDate = $props.InstallDate.ToString().Trim()
+                        if ($rawDate -match '^\d{8}$') { $installDate = [datetime]::ParseExact($rawDate,'yyyyMMdd',$null).ToString('MM/dd/yyyy') }
+                    }
+                } catch { }
+
+                $results.Add([pscustomobject]@{
+                    DisplayName     = $displayName
+                    Publisher       = $publisher
+                    Version         = $version
+                    InstallDate     = $installDate
+                    SizeStr         = $sizeStr
+                    SizeKB          = $sizeKB
+                    UninstallString = $uninstallString
+                    QuietUninstall  = $quietUn
+                    InstallLocation = $instLoc
+                })
+                $hiveAdded++
+
+            } catch { $hiveSkipped++ }
+        }
+
+        $Script:UninstDiag.HiveCounts[$hiveLabel] = "added=$hiveAdded skipped=$hiveSkipped (of $($subkeys.Count))"
+        $Script:UninstDiag.Added   += $hiveAdded
+        $Script:UninstDiag.Skipped += $hiveSkipped
     }
+
+    return $results | Sort-Object DisplayName
+}
+
+function Invoke-UninstallApp {
+    param(
+        [Parameter(Mandatory=$true)][pscustomobject]$App,
+        [Parameter(Mandatory=$true)][System.Windows.Forms.RichTextBox]$OutputBox,
+        [Parameter(Mandatory=$true)][System.Windows.Forms.ToolStripStatusLabel]$StatusLabel
+    )
+
+    Write-Log -Message "==> Uninstalling: $($App.DisplayName)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
+
+    # Prefer quiet uninstall string
+    $rawCmd = if (-not [string]::IsNullOrWhiteSpace($App.QuietUninstall)) { $App.QuietUninstall } else { $App.UninstallString }
+
+    # Parse exe + arguments
+    $exe    = $null
+    $argStr = ""
+
+    if ($rawCmd -match '^"([^"]+)"(.*)$') {
+        $exe    = $matches[1].Trim()
+        $argStr = $matches[2].Trim()
+    } elseif ($rawCmd -match '^([^\s"]+\.exe)\s*(.*)$') {
+        $exe    = $matches[1].Trim()
+        $argStr = $matches[2].Trim()
+    } else {
+        $exe    = $rawCmd
+        $argStr = ""
+    }
+
+    if ([string]::IsNullOrWhiteSpace($exe)) {
+        Write-Log -Message "  ERROR: Could not parse uninstall string: $rawCmd" -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel
+        return $false
+    }
+
+    # Inject quiet flags for MSI-based uninstallers if not already present
+    $isMsi = ($exe -match 'msiexec' -or $argStr -match '/[XI]\s*\{[0-9A-F-]+\}')
+    if ($isMsi -and $argStr -notmatch '/q|/quiet|/passive|/qn') {
+        # Swap /I for /X if present (install → uninstall), then add quiet
+        $argStr = $argStr -replace '/I\s*(\{)', '/X $1'
+        $argStr = "$argStr /qn /norestart"
+    }
+
+    Write-Log -Message "  Exe: $exe" -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel
+    if ($argStr) { Write-Log -Message "  Args: $argStr" -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
+
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName               = $exe
+        $psi.Arguments              = $argStr
+        $psi.UseShellExecute        = $false
+        $psi.CreateNoWindow         = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $deadline = (Get-Date).AddSeconds(300)
+
+        while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 250
+        }
+
+        if (-not $p.HasExited) { try { $p.Kill() } catch { } }
+
+        $exitColor = if ($p.ExitCode -in 0,3010,1605) { $Script:Colors.Success } else { $Script:Colors.Danger }
+        Write-Log -Message "  Exit code: $($p.ExitCode)" -OutputBox $OutputBox -Color $exitColor -StatusLabel $StatusLabel
+        return ($p.ExitCode -in 0,3010,1605)
+    } catch {
+        Write-Log -Message "  Uninstall exception: $($_.Exception.Message)" -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel
+        return $false
+    }
+}
+
+function Invoke-DeepClean {
+    param(
+        [Parameter(Mandatory=$true)][pscustomobject]$App,
+        [Parameter(Mandatory=$true)][System.Windows.Forms.RichTextBox]$OutputBox,
+        [Parameter(Mandatory=$true)][System.Windows.Forms.ToolStripStatusLabel]$StatusLabel
+    )
+
+    Write-Log -Message "  [Deep Clean] Scanning for leftovers..." -OutputBox $OutputBox -Color $Script:Colors.BlueAccent -StatusLabel $StatusLabel
+
+    # Build search terms: first meaningful word from name and publisher
+    $searchTerms = @()
+    $cleanName = $App.DisplayName -replace '\s+\d[\d\.\s]*$','' -replace '\s+(x86|x64|32.bit|64.bit)$','' -replace '[^a-zA-Z0-9\s]','' -replace '\s+',' '
+    $nameWords = @($cleanName.Trim() -split ' ' | Where-Object { $_.Length -gt 3 })
+    if ($nameWords.Count -gt 0) { $searchTerms += $nameWords[0] }
+
+    if ($App.Publisher -and $App.Publisher.Trim().Length -gt 3) {
+        $pubWords = @($App.Publisher.Trim() -split '\s+' | Where-Object { $_.Length -gt 3 })
+        if ($pubWords.Count -gt 0 -and -not ($searchTerms -contains $pubWords[0])) { $searchTerms += $pubWords[0] }
+    }
+
+    $removed = 0
+
+    # Explicit install location first
+    if (-not [string]::IsNullOrWhiteSpace($App.InstallLocation)) {
+        $loc = $App.InstallLocation.TrimEnd('\').Trim()
+        if ($loc.Length -gt 5 -and (Test-Path -LiteralPath $loc)) {
+            Write-Log -Message "  Leftover install dir: $loc" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
+            try { Remove-Item -LiteralPath $loc -Recurse -Force -ErrorAction Stop; $removed++; Write-Log -Message "  Removed: $loc" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+            catch { Write-Log -Message "  Could not remove (in use?): $loc" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
+        }
+    }
+
+    # File system scan — user and shared profile dirs
+    $fsScanRoots = @(
+        $env:APPDATA, $env:LOCALAPPDATA, $env:ProgramData,
+        $env:ProgramFiles, ${env:ProgramFiles(x86)},
+        (Join-Path $env:LOCALAPPDATA "Programs"),
+        (Join-Path $env:ProgramData  "Microsoft\Windows\Start Menu\Programs")
+    )
+
+    foreach ($root in $fsScanRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) }) {
+        foreach ($term in $searchTerms) {
+            try {
+                $hits = @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
+                          Where-Object { $_.Name -like "*$term*" })
+                foreach ($h in $hits) {
+                    Write-Log -Message "  Leftover folder: $($h.FullName)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
+                    try { Remove-Item -LiteralPath $h.FullName -Recurse -Force -ErrorAction Stop; $removed++; Write-Log -Message "  Removed: $($h.FullName)" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+                    catch { Write-Log -Message "  Could not remove: $($h.FullName)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
+                }
+            } catch { }
+        }
+    }
+
+    # Registry scan
+    $regScanRoots = @(
+        "HKLM:\SOFTWARE",
+        "HKLM:\SOFTWARE\WOW6432Node",
+        "HKCU:\SOFTWARE",
+        "HKCU:\SOFTWARE\Classes"
+    )
+
+    foreach ($regRoot in $regScanRoots) {
+        foreach ($term in $searchTerms) {
+            try {
+                $keys = @(Get-ChildItem -Path $regRoot -ErrorAction SilentlyContinue |
+                          Where-Object { $_.PSChildName -like "*$term*" })
+                foreach ($key in $keys) {
+                    # Safety: never touch Microsoft, Windows, or known system key paths
+                    $safe = $key.PSPath -notmatch '\\(Microsoft\\Windows|Classes\\CLSID|Classes\\Interface|Classes\\TypeLib)\\'
+                    if (-not $safe) { continue }
+                    Write-Log -Message "  Leftover registry key: $($key.PSPath)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
+                    try { Remove-Item -LiteralPath $key.PSPath -Recurse -Force -ErrorAction Stop; $removed++; Write-Log -Message "  Removed: $($key.PSPath)" -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+                    catch { Write-Log -Message "  Could not remove: $($key.PSPath)" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
+                }
+            } catch { }
+        }
+    }
+
+    if ($removed -eq 0) { Write-Log -Message "  No additional leftovers found." -OutputBox $OutputBox -Color $Script:Colors.TextMuted -StatusLabel $StatusLabel }
+    else { Write-Log -Message "  Deep clean complete: $removed leftover items removed." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+}
 
 #------------------------------------------------------------------------------------------------
 # 11) GUI Construction
@@ -1442,8 +1615,8 @@ $mainForm.StartPosition   = "CenterScreen"
 $mainForm.Size            = New-Object System.Drawing.Size -ArgumentList 760, 920
 $mainForm.FormBorderStyle = 'FixedSingle'
 $mainForm.MaximizeBox     = $false
-$mainForm.BackColor       = [System.Drawing.Color]::FromArgb(43,46,49)
-$mainForm.ForeColor       = [System.Drawing.Color]::White
+$mainForm.BackColor       = $Script:Colors.BgPrimary
+$mainForm.ForeColor       = $Script:Colors.TextPrimary
 
 $toolTip = New-Object System.Windows.Forms.ToolTip
 $toolTip.AutoPopDelay = 20000
@@ -1456,9 +1629,9 @@ $tabs.Size     = New-Object System.Drawing.Size -ArgumentList 715, 400
 
 function New-Tab { param([string]$Text)
     $t = New-Object System.Windows.Forms.TabPage
-    $t.Text = $Text
-    $t.BackColor = [System.Drawing.Color]::FromArgb(43,46,49)
-    $t.ForeColor = [System.Drawing.Color]::White
+    $t.Text      = $Text
+    $t.BackColor = $Script:Colors.BgSurface
+    $t.ForeColor = $Script:Colors.TextPrimary
     return $t
 }
 
@@ -1466,11 +1639,13 @@ $tabPrivacy     = New-Tab "Privacy"
 $tabPerformance = New-Tab "Performance"
 $tabDebloat     = New-Tab "Debloat"
 $tabMaintenance = New-Tab "Maintenance"
+$tabUninstaller = New-Tab "Uninstaller"
 
 [void]$tabs.TabPages.Add($tabPrivacy)
 [void]$tabs.TabPages.Add($tabPerformance)
 [void]$tabs.TabPages.Add($tabDebloat)
 [void]$tabs.TabPages.Add($tabMaintenance)
+[void]$tabs.TabPages.Add($tabUninstaller)
 
 $Script:CheckBoxes  = @{}
 $Script:StateLabels = @{}
@@ -1481,21 +1656,21 @@ function Add-TweaksToTab {
     $scrollPanel.Location   = New-Object System.Drawing.Point -ArgumentList 0, 0
     $scrollPanel.Size       = New-Object System.Drawing.Size -ArgumentList 700, 340
     $scrollPanel.AutoScroll = $true
-    $scrollPanel.BackColor  = $Tab.BackColor
+    $scrollPanel.BackColor  = $Script:Colors.BgSurface
 
     $y = 15
     foreach ($t in $Script:Tweaks | Where-Object { $_.Category -eq $Category }) {
         $cb = New-Object System.Windows.Forms.CheckBox
-        $cb.Text     = $t.Name
-        $cb.Location = New-Object System.Drawing.Point -ArgumentList 15, $y
-        $cb.Size     = New-Object System.Drawing.Size -ArgumentList 490, 22
-        $cb.ForeColor = [System.Drawing.Color]::White
-        $cb.BackColor = $Tab.BackColor
+        $cb.Text      = $t.Name
+        $cb.Location  = New-Object System.Drawing.Point -ArgumentList 15, $y
+        $cb.Size      = New-Object System.Drawing.Size -ArgumentList 490, 22
+        $cb.ForeColor = $Script:Colors.TextPrimary
+        $cb.BackColor = $Script:Colors.BgSurface
 
         $lbl = New-Object System.Windows.Forms.Label
         $lbl.Location  = New-Object System.Drawing.Point -ArgumentList 525, ($y+2)
         $lbl.Size      = New-Object System.Drawing.Size -ArgumentList 155, 20
-        $lbl.ForeColor = [System.Drawing.Color]::Silver
+        $lbl.ForeColor = $Script:Colors.TextMuted
         $lbl.TextAlign = 'MiddleRight'
 
         $rebootMark = if ($t.RequiresReboot) { ' | Reboot: Yes' } else { ' | Reboot: No' }
@@ -1513,10 +1688,10 @@ function Add-TweaksToTab {
     $btnTabNone = New-Object System.Windows.Forms.Button
     foreach ($b in @($btnTabAll,$btnTabNone)) {
         $b.Size      = New-Object System.Drawing.Size -ArgumentList 90, 22
-        $b.ForeColor = [System.Drawing.Color]::White
+        $b.ForeColor = $Script:Colors.TextPrimary
         $b.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
         $b.FlatAppearance.BorderSize = 0
-        $b.BackColor = [System.Drawing.Color]::FromArgb(60,65,70)
+        $b.BackColor = $Script:Colors.BgMid
     }
     $btnTabAll.Text  = "Select All"
     $btnTabNone.Text = "Deselect All"
@@ -1545,34 +1720,155 @@ Add-TweaksToTab -Tab $tabPerformance -Category "Performance"
 Add-TweaksToTab -Tab $tabDebloat     -Category "Debloat"
 Add-TweaksToTab -Tab $tabMaintenance -Category "Maintenance"
 
-$cbRestorePoint = New-Object System.Windows.Forms.CheckBox
-$cbRestorePoint.Text     = "Create a System Restore Point before applying (if available)"
-$cbRestorePoint.Location = New-Object System.Drawing.Point -ArgumentList 15, 425
-$cbRestorePoint.Size     = New-Object System.Drawing.Size -ArgumentList 520, 22
-$cbRestorePoint.ForeColor = [System.Drawing.Color]::White
-$cbRestorePoint.BackColor = $mainForm.BackColor
-$cbRestorePoint.Checked  = $false
+#==== Uninstaller Tab UI ====
 
-function New-Button($text,$x,$y,$w,$h,$rgb) {
+$uninstPanel = New-Object System.Windows.Forms.Panel
+$uninstPanel.Location  = New-Object System.Drawing.Point -ArgumentList 0, 0
+$uninstPanel.Size      = New-Object System.Drawing.Size -ArgumentList 707, 370
+$uninstPanel.BackColor = $Script:Colors.BgSurface
+[void]$tabUninstaller.Controls.Add($uninstPanel)
+
+# Search row
+$lblSearch = New-Object System.Windows.Forms.Label
+$lblSearch.Text      = "Search:"
+$lblSearch.Location  = New-Object System.Drawing.Point -ArgumentList 10, 13
+$lblSearch.Size      = New-Object System.Drawing.Size -ArgumentList 48, 20
+$lblSearch.ForeColor = $Script:Colors.TextMuted
+$lblSearch.Font      = New-Object System.Drawing.Font("Segoe UI", 9)
+
+$txtSearch = New-Object System.Windows.Forms.TextBox
+$txtSearch.Location  = New-Object System.Drawing.Point -ArgumentList 62, 10
+$txtSearch.Size      = New-Object System.Drawing.Size -ArgumentList 340, 22
+$txtSearch.BackColor = $Script:Colors.BgMid
+$txtSearch.ForeColor = $Script:Colors.TextPrimary
+$txtSearch.BorderStyle = 'FixedSingle'
+$txtSearch.Font      = New-Object System.Drawing.Font("Segoe UI", 9)
+
+$btnUninstRefresh = New-Object System.Windows.Forms.Button
+$btnUninstRefresh.Text      = "Refresh List"
+$btnUninstRefresh.Location  = New-Object System.Drawing.Point -ArgumentList 412, 8
+$btnUninstRefresh.Size      = New-Object System.Drawing.Size -ArgumentList 100, 26
+$btnUninstRefresh.BackColor = $Script:Colors.BgMid
+$btnUninstRefresh.ForeColor = $Script:Colors.TextPrimary
+$btnUninstRefresh.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnUninstRefresh.FlatAppearance.BorderSize = 0
+
+$lblAppCount = New-Object System.Windows.Forms.Label
+$lblAppCount.Location  = New-Object System.Drawing.Point -ArgumentList 522, 13
+$lblAppCount.Size      = New-Object System.Drawing.Size -ArgumentList 175, 18
+$lblAppCount.ForeColor = $Script:Colors.TextMuted
+$lblAppCount.TextAlign = 'MiddleRight'
+$lblAppCount.Font      = New-Object System.Drawing.Font("Segoe UI", 8)
+$lblAppCount.Text      = "No apps loaded"
+
+# Deep clean checkbox
+$cbDeepClean = New-Object System.Windows.Forms.CheckBox
+$cbDeepClean.Text      = "Deep Clean after uninstall (scans for leftover files & registry keys)"
+$cbDeepClean.Location  = New-Object System.Drawing.Point -ArgumentList 10, 38
+$cbDeepClean.Size      = New-Object System.Drawing.Size -ArgumentList 510, 20
+$cbDeepClean.ForeColor = $Script:Colors.TextMuted
+$cbDeepClean.BackColor = $Script:Colors.BgSurface
+$cbDeepClean.Checked   = $true
+$cbDeepClean.Font      = New-Object System.Drawing.Font("Segoe UI", 8)
+
+# ListView
+$uninstListView = New-Object System.Windows.Forms.ListView
+$uninstListView.Location        = New-Object System.Drawing.Point -ArgumentList 10, 62
+$uninstListView.Size            = New-Object System.Drawing.Size -ArgumentList 687, 248
+$uninstListView.View            = [System.Windows.Forms.View]::Details
+$uninstListView.FullRowSelect   = $true
+$uninstListView.CheckBoxes      = $true
+$uninstListView.MultiSelect     = $true
+$uninstListView.GridLines       = $false
+$uninstListView.BackColor       = $Script:Colors.BgPrimary
+$uninstListView.ForeColor       = $Script:Colors.TextPrimary
+$uninstListView.BorderStyle     = 'FixedSingle'
+$uninstListView.Font            = New-Object System.Drawing.Font("Segoe UI", 9)
+$uninstListView.HeaderStyle     = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
+
+[void]$uninstListView.Columns.Add("Name",      230)
+[void]$uninstListView.Columns.Add("Publisher", 150)
+[void]$uninstListView.Columns.Add("Version",    90)
+[void]$uninstListView.Columns.Add("Installed",  90)
+[void]$uninstListView.Columns.Add("Size",        80)
+
+# Bottom button row
+$btnUninstSelectAll = New-Object System.Windows.Forms.Button
+$btnUninstSelectAll.Text      = "Select All"
+$btnUninstSelectAll.Location  = New-Object System.Drawing.Point -ArgumentList 10, 318
+$btnUninstSelectAll.Size      = New-Object System.Drawing.Size -ArgumentList 90, 28
+$btnUninstSelectAll.BackColor = $Script:Colors.BgMid
+$btnUninstSelectAll.ForeColor = $Script:Colors.TextPrimary
+$btnUninstSelectAll.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnUninstSelectAll.FlatAppearance.BorderSize = 0
+
+$btnUninstDeselectAll = New-Object System.Windows.Forms.Button
+$btnUninstDeselectAll.Text      = "Deselect All"
+$btnUninstDeselectAll.Location  = New-Object System.Drawing.Point -ArgumentList 110, 318
+$btnUninstDeselectAll.Size      = New-Object System.Drawing.Size -ArgumentList 90, 28
+$btnUninstDeselectAll.BackColor = $Script:Colors.BgMid
+$btnUninstDeselectAll.ForeColor = $Script:Colors.TextPrimary
+$btnUninstDeselectAll.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnUninstDeselectAll.FlatAppearance.BorderSize = 0
+
+$lblSelectedCount = New-Object System.Windows.Forms.Label
+$lblSelectedCount.Location  = New-Object System.Drawing.Point -ArgumentList 210, 323
+$lblSelectedCount.Size      = New-Object System.Drawing.Size -ArgumentList 200, 18
+$lblSelectedCount.ForeColor = $Script:Colors.TextMuted
+$lblSelectedCount.Font      = New-Object System.Drawing.Font("Segoe UI", 8)
+$lblSelectedCount.Text      = "0 selected"
+
+$btnUninstallSelected = New-Object System.Windows.Forms.Button
+$btnUninstallSelected.Text      = "Uninstall Selected"
+$btnUninstallSelected.Location  = New-Object System.Drawing.Point -ArgumentList 507, 316
+$btnUninstallSelected.Size      = New-Object System.Drawing.Size -ArgumentList 190, 32
+$btnUninstallSelected.BackColor = $Script:Colors.BluePrimary
+$btnUninstallSelected.ForeColor = $Script:Colors.TextPrimary
+$btnUninstallSelected.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnUninstallSelected.FlatAppearance.BorderSize = 0
+$btnUninstallSelected.Font      = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+
+[void]$uninstPanel.Controls.Add($lblSearch)
+[void]$uninstPanel.Controls.Add($txtSearch)
+[void]$uninstPanel.Controls.Add($btnUninstRefresh)
+[void]$uninstPanel.Controls.Add($lblAppCount)
+[void]$uninstPanel.Controls.Add($cbDeepClean)
+[void]$uninstPanel.Controls.Add($uninstListView)
+[void]$uninstPanel.Controls.Add($btnUninstSelectAll)
+[void]$uninstPanel.Controls.Add($btnUninstDeselectAll)
+[void]$uninstPanel.Controls.Add($lblSelectedCount)
+[void]$uninstPanel.Controls.Add($btnUninstallSelected)
+
+#==== Main form controls ====
+
+$cbRestorePoint = New-Object System.Windows.Forms.CheckBox
+$cbRestorePoint.Text      = "Create a System Restore Point before applying (if available)"
+$cbRestorePoint.Location  = New-Object System.Drawing.Point -ArgumentList 15, 425
+$cbRestorePoint.Size      = New-Object System.Drawing.Size -ArgumentList 520, 22
+$cbRestorePoint.ForeColor = $Script:Colors.TextPrimary
+$cbRestorePoint.BackColor = $Script:Colors.BgPrimary
+$cbRestorePoint.Checked   = $false
+
+function New-Button($text,$x,$y,$w,$h,$color) {
     $b = New-Object System.Windows.Forms.Button
     $b.Text      = $text
     $b.Location  = New-Object System.Drawing.Point -ArgumentList $x,$y
     $b.Size      = New-Object System.Drawing.Size -ArgumentList $w,$h
-    $b.BackColor = [System.Drawing.Color]::FromArgb($rgb[0],$rgb[1],$rgb[2])
-    $b.ForeColor = [System.Drawing.Color]::White
+    $b.BackColor = $color
+    $b.ForeColor = $Script:Colors.TextPrimary
     $b.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
     $b.FlatAppearance.BorderSize = 0
     return $b
 }
 
-$btnSelectAll   = New-Button "Select All"     15  453 100 34 @(74,79,84)
-$btnDeselectAll = New-Button "Deselect All"   125 453 100 34 @(74,79,84)
-$btnRecommended = New-Button "Recommended"    235 453 110 34 @(74,79,84)
-$btnRefresh     = New-Button "Refresh State"  355 453 110 34 @(74,79,84)
-$btnApply       = New-Button "Apply Selected" 475 453 225 34 @(24,131,198)
-$btnUndoLast    = New-Button "Undo Last Run"  475 493 225 34 @(90,96,101)
-$btnExportLog   = New-Button "Export Log"     355 493 110 34 @(74,79,84)
-$btnCancel      = New-Button "Cancel"         235 493 110 34 @(74,79,84)
+$btnSelectAll   = New-Button "Select All"     15  453 100 34 $Script:Colors.BgMid
+$btnDeselectAll = New-Button "Deselect All"   125 453 100 34 $Script:Colors.BgMid
+$btnRecommended = New-Button "Recommended"    235 453 110 34 $Script:Colors.BgMid
+$btnRefresh     = New-Button "Refresh State"  355 453 110 34 $Script:Colors.BgMid
+$btnApply       = New-Button "Apply Selected" 475 453 225 34 $Script:Colors.BluePrimary
+$btnUndoLast    = New-Button "Undo Last Run"  475 493 225 34 $Script:Colors.BgSurface
+$btnExportLog   = New-Button "Export Log"     355 493 110 34 $Script:Colors.BgMid
+$btnCancel      = New-Button "Cancel"         235 493 110 34 $Script:Colors.BgMid
 $btnCancel.Enabled = $false
 
 $progress = New-Object System.Windows.Forms.ProgressBar
@@ -1583,16 +1879,16 @@ $progress.Maximum  = 100
 $progress.Value    = 0
 
 $outputBox = New-Object System.Windows.Forms.RichTextBox
-$outputBox.Location = New-Object System.Drawing.Point -ArgumentList 15, 530
-$outputBox.Size     = New-Object System.Drawing.Size -ArgumentList 715, 315
+$outputBox.Location  = New-Object System.Drawing.Point -ArgumentList 15, 530
+$outputBox.Size      = New-Object System.Drawing.Size -ArgumentList 715, 315
 $outputBox.ReadOnly  = $true
-$outputBox.BackColor = [System.Drawing.Color]::FromArgb(28,30,32)
-$outputBox.ForeColor = [System.Drawing.Color]::White
+$outputBox.BackColor = $Script:Colors.OutputBg
+$outputBox.ForeColor = $Script:Colors.TextPrimary
 $outputBox.Font      = New-Object System.Drawing.Font("Consolas", 9)
 
 $statusStrip = New-Object System.Windows.Forms.StatusStrip
-$statusStrip.BackColor = [System.Drawing.Color]::FromArgb(43,46,49)
-$statusStrip.ForeColor = [System.Drawing.Color]::White
+$statusStrip.BackColor = $Script:Colors.BgPrimary
+$statusStrip.ForeColor = $Script:Colors.TextPrimary
 $statusLabel = New-Object System.Windows.Forms.ToolStripStatusLabel
 $statusLabel.Text = "Ready"
 [void]$statusStrip.Items.Add($statusLabel)
@@ -1600,7 +1896,7 @@ $statusLabel.Text = "Ready"
 $lblLogPath = New-Object System.Windows.Forms.Label
 $lblLogPath.Location  = New-Object System.Drawing.Point -ArgumentList 15, 853
 $lblLogPath.Size      = New-Object System.Drawing.Size -ArgumentList 715, 16
-$lblLogPath.ForeColor = [System.Drawing.Color]::FromArgb(100,100,100)
+$lblLogPath.ForeColor = $Script:Colors.TextMuted
 $lblLogPath.Font      = New-Object System.Drawing.Font("Consolas", 7)
 $lblLogPath.Text      = "Log: $Script:SessionLog"
 
@@ -1634,9 +1930,9 @@ function Refresh-TweakStates {
         if ($lbl) {
             $lbl.Text = $state
             $lbl.ForeColor = switch ($state) {
-                "Applied"      { [System.Drawing.Color]::LimeGreen }
-                "NotApplied"   { [System.Drawing.Color]::Silver }
-                "Partial"      { [System.Drawing.Color]::Gold }
+                "Applied"      { $Script:Colors.Success }
+                "NotApplied"   { $Script:Colors.TextMuted }
+                "Partial"      { $Script:Colors.Warning }
                 "NotAvailable" { [System.Drawing.Color]::Gray }
                 "N-A"          { [System.Drawing.Color]::Gray }
                 default        { [System.Drawing.Color]::Orange }
@@ -1649,6 +1945,64 @@ function Refresh-TweakStates {
 }
 
 #------------------------------------------------------------------------------------------------
+# 12.5) Uninstaller List Population
+#------------------------------------------------------------------------------------------------
+function Populate-UninstallList {
+    param([string]$Filter = "")
+    $uninstListView.BeginUpdate()
+    $uninstListView.Items.Clear()
+
+    $source = $Script:AllInstalledApps
+    if ($Filter.Trim().Length -gt 0) {
+        $f = $Filter.Trim()
+        $source = @($source | Where-Object {
+            $_.DisplayName -like "*$f*" -or $_.Publisher -like "*$f*"
+        })
+    }
+
+    foreach ($app in $source) {
+        $item = New-Object System.Windows.Forms.ListViewItem($app.DisplayName)
+        [void]$item.SubItems.Add($app.Publisher)
+        [void]$item.SubItems.Add($app.Version)
+        [void]$item.SubItems.Add($app.InstallDate)
+        [void]$item.SubItems.Add($app.SizeStr)
+        $item.Tag = $app
+        [void]$uninstListView.Items.Add($item)
+    }
+
+    $uninstListView.EndUpdate()
+    $total = $source.Count
+    $lblAppCount.Text = if ($total -eq 0) { "No apps found" } else { "$total app$(if($total -ne 1){'s'})" }
+    $lblSelectedCount.Text = "0 selected"
+}
+
+function Refresh-UninstallList {
+    $btnUninstRefresh.Enabled   = $false
+    $btnUninstallSelected.Enabled = $false
+    $statusLabel.Text = "Loading installed applications..."
+    [System.Windows.Forms.Application]::DoEvents()
+
+    try {
+        $Script:AllInstalledApps = @(Get-InstalledApps)
+        # Log per-hive diagnostics so scan issues are visible in the output pane
+        Write-Log -Message "--- Uninstaller scan ---" -OutputBox $outputBox -Color $Script:Colors.TextMuted -StatusLabel $statusLabel
+        foreach ($kv in $Script:UninstDiag.HiveCounts.GetEnumerator()) {
+            Write-Log -Message "  Hive [$($kv.Key)]: $($kv.Value)" -OutputBox $outputBox -Color $Script:Colors.TextMuted -StatusLabel $statusLabel
+        }
+        Write-Log -Message "  Total added=$($Script:UninstDiag.Added) skipped=$($Script:UninstDiag.Skipped)" -OutputBox $outputBox -Color $Script:Colors.TextMuted -StatusLabel $statusLabel
+        Populate-UninstallList -Filter $txtSearch.Text
+        Write-Log -Message "Uninstaller: $($Script:AllInstalledApps.Count) applications loaded." -OutputBox $outputBox -Color $Script:Colors.BlueAccent -StatusLabel $statusLabel
+    } catch {
+        Write-Log -Message "Uninstaller: scan exception — $($_.Exception.Message)" -OutputBox $outputBox -Color $Script:Colors.Danger -StatusLabel $statusLabel
+        Write-Log -Message "  $($_.ScriptStackTrace)" -OutputBox $outputBox -Color $Script:Colors.Danger -StatusLabel $statusLabel
+    } finally {
+        $btnUninstRefresh.Enabled     = $true
+        $btnUninstallSelected.Enabled = $true
+        $statusLabel.Text = "Ready"
+    }
+}
+
+#------------------------------------------------------------------------------------------------
 # 13) Apply Engine (UI Timer)
 #------------------------------------------------------------------------------------------------
 $Script:ApplyRun = $null
@@ -1657,36 +2011,38 @@ $applyTimer.Interval = 50
 
 function Set-UiRunningState {
     param([bool]$IsRunning)
-    $btnApply.Enabled       = -not $IsRunning
-    $btnCancel.Enabled      = $IsRunning
-    $btnSelectAll.Enabled   = -not $IsRunning
-    $btnDeselectAll.Enabled = -not $IsRunning
-    $btnRecommended.Enabled = -not $IsRunning
-    $btnRefresh.Enabled     = -not $IsRunning
-    $btnUndoLast.Enabled    = -not $IsRunning
-    $btnExportLog.Enabled   = -not $IsRunning
-    $cbRestorePoint.Enabled = -not $IsRunning
+    $btnApply.Enabled             = -not $IsRunning
+    $btnCancel.Enabled            = $IsRunning
+    $btnSelectAll.Enabled         = -not $IsRunning
+    $btnDeselectAll.Enabled       = -not $IsRunning
+    $btnRecommended.Enabled       = -not $IsRunning
+    $btnRefresh.Enabled           = -not $IsRunning
+    $btnUndoLast.Enabled          = -not $IsRunning
+    $btnExportLog.Enabled         = -not $IsRunning
+    $cbRestorePoint.Enabled       = -not $IsRunning
+    $btnUninstallSelected.Enabled = -not $IsRunning
+    $btnUninstRefresh.Enabled     = -not $IsRunning
 }
 
 function Start-ApplyRun {
     param([Parameter(Mandatory=$true)][string[]]$SelectedIds,[Parameter(Mandatory=$true)][bool]$CreateRestorePoint)
     $Script:ApplyRun = [pscustomobject]@{
-        SelectedIds      = $SelectedIds
-        Queue            = New-Object System.Collections.Generic.Queue[string]
-        Total            = [Math]::Max(1,$SelectedIds.Count)
-        Index            = 0
-        BackupCtx        = (New-BackupContext)
-        CreateRestore    = $CreateRestorePoint
-        RestoreDone      = $false
-        CancelRequested  = $false
-        HadErrors        = $false
-        ManifestPath     = $null
+        SelectedIds     = $SelectedIds
+        Queue           = New-Object System.Collections.Generic.Queue[string]
+        Total           = [Math]::Max(1,$SelectedIds.Count)
+        Index           = 0
+        BackupCtx       = (New-BackupContext)
+        CreateRestore   = $CreateRestorePoint
+        RestoreDone     = $false
+        CancelRequested = $false
+        HadErrors       = $false
+        ManifestPath    = $null
     }
     foreach ($id in $SelectedIds) { [void]$Script:ApplyRun.Queue.Enqueue($id) }
     Set-UiRunningState -IsRunning $true
     $progress.Value = 0
     $statusLabel.Text = "Starting..."
-    Write-Log -Message ("Starting apply run. Selected tweaks: {0}" -f ($SelectedIds -join ", ")) -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel
+    Write-Log -Message ("Starting apply run. Selected tweaks: {0}" -f ($SelectedIds -join ", ")) -OutputBox $outputBox -Color $Script:Colors.TextMuted -StatusLabel $statusLabel
     $applyTimer.Start()
 }
 
@@ -1695,21 +2051,21 @@ function Complete-ApplyRun {
     $applyTimer.Stop()
     Set-UiRunningState -IsRunning $false
     if ($Outcome -eq "Cancelled") {
-        Write-Log -Message "Operation cancelled by user." -OutputBox $outputBox -Color Yellow -StatusLabel $statusLabel
+        Write-Log -Message "Operation cancelled by user." -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
         $statusLabel.Text = "Cancelled"
     } elseif ($Outcome -eq "Error") {
-        Write-Log -Message ("Worker error: {0}" -f $ErrorMessage) -OutputBox $outputBox -Color Red -StatusLabel $statusLabel
+        Write-Log -Message ("Worker error: {0}" -f $ErrorMessage) -OutputBox $outputBox -Color $Script:Colors.Danger -StatusLabel $statusLabel
         $statusLabel.Text = "Error"
     } else {
         $manifestPath = [string]$Script:ApplyRun.ManifestPath
         if ([string]::IsNullOrWhiteSpace($manifestPath)) {
-            Write-Log -Message "Operations complete. Backup manifest was not saved." -OutputBox $outputBox -Color Yellow -StatusLabel $statusLabel
+            Write-Log -Message "Operations complete. Backup manifest was not saved." -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
         } else {
-            Write-Log -Message "Backup manifest saved: $manifestPath" -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel
+            Write-Log -Message "Backup manifest saved: $manifestPath" -OutputBox $outputBox -Color $Script:Colors.TextMuted -StatusLabel $statusLabel
             if ($Script:ApplyRun.HadErrors) {
-                Write-Log -Message "Operations complete. Some items may have failed; review the log." -OutputBox $outputBox -Color Gold -StatusLabel $statusLabel
+                Write-Log -Message "Operations complete. Some items may have failed — review the log." -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
             } else {
-                Write-Log -Message "All selected operations completed successfully." -OutputBox $outputBox -Color Gold -StatusLabel $statusLabel
+                Write-Log -Message "All selected operations completed successfully." -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
             }
         }
         $statusLabel.Text = "Complete"
@@ -1727,10 +2083,10 @@ $applyTimer.Add_Tick({
         if ($Script:ApplyRun.CreateRestore -and -not $Script:ApplyRun.RestoreDone) {
             $statusLabel.Text = "Working: Restore point"
             try {
-                Write-Log -Message "Attempting to create System Restore Point..." -OutputBox $outputBox -Color Gold -StatusLabel $statusLabel
+                Write-Log -Message "Attempting to create System Restore Point..." -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
                 Checkpoint-Computer -Description ("$($Script:AppName) {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")) -RestorePointType "MODIFY_SETTINGS" | Out-Null
-                Write-Log -Message "Restore point created." -OutputBox $outputBox -Color LimeGreen -StatusLabel $statusLabel
-            } catch { Write-Log -Message ("Restore point failed: {0}" -f $_.Exception.Message) -OutputBox $outputBox -Color Yellow -StatusLabel $statusLabel }
+                Write-Log -Message "Restore point created." -OutputBox $outputBox -Color $Script:Colors.Success -StatusLabel $statusLabel
+            } catch { Write-Log -Message ("Restore point failed: {0}" -f $_.Exception.Message) -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel }
             finally { $Script:ApplyRun.RestoreDone = $true }
             return
         }
@@ -1753,17 +2109,84 @@ $applyTimer.Add_Tick({
 
         try {
             & $t.Apply $Script:ApplyRun.BackupCtx $outputBox $statusLabel
-            Write-Log -Message ("OK: {0}" -f $t.Name) -OutputBox $outputBox -Color LimeGreen -StatusLabel $statusLabel
+            Write-Log -Message ("OK: {0}" -f $t.Name) -OutputBox $outputBox -Color $Script:Colors.Success -StatusLabel $statusLabel
         } catch {
             $Script:ApplyRun.HadErrors = $true
-            Write-Log -Message ("ERROR: {0} failed -> {1}" -f $t.Name, $_.Exception.Message) -OutputBox $outputBox -Color Red -StatusLabel $statusLabel
+            Write-Log -Message ("ERROR: {0} failed -> {1}" -f $t.Name, $_.Exception.Message) -OutputBox $outputBox -Color $Script:Colors.Danger -StatusLabel $statusLabel
         }
     } catch { Complete-ApplyRun -Outcome "Error" -ErrorMessage $_.Exception.Message }
 })
 
 #------------------------------------------------------------------------------------------------
+# 13.5) Uninstall Engine
+#------------------------------------------------------------------------------------------------
+$Script:UninstallRun = $null
+$uninstallTimer = New-Object System.Windows.Forms.Timer
+$uninstallTimer.Interval = 50
+
+function Start-UninstallRun {
+    param([Parameter(Mandatory=$true)][pscustomobject[]]$AppsToRemove,[bool]$DeepClean = $false)
+    $Script:UninstallRun = [pscustomobject]@{
+        Queue     = New-Object System.Collections.Generic.Queue[pscustomobject]
+        Total     = [Math]::Max(1,$AppsToRemove.Count)
+        Index     = 0
+        DeepClean = $DeepClean
+        HadErrors = $false
+        Done      = @()
+    }
+    foreach ($a in $AppsToRemove) { [void]$Script:UninstallRun.Queue.Enqueue($a) }
+    Set-UiRunningState -IsRunning $true
+    $progress.Value = 0
+    Write-Log -Message ("=== Uninstall run: {0} app(s) queued ===" -f $AppsToRemove.Count) -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
+    $uninstallTimer.Start()
+}
+
+function Complete-UninstallRun {
+    $uninstallTimer.Stop()
+    Set-UiRunningState -IsRunning $false
+    $progress.Value = 0
+    $doneCount = $Script:UninstallRun.Done.Count
+    Write-Log -Message ("=== Uninstall run complete. {0}/{1} succeeded ===" -f $doneCount, $Script:UninstallRun.Total) -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
+    $statusLabel.Text = "Uninstall complete"
+    $Script:UninstallRun = $null
+    # Reload the app list after removal
+    Start-Sleep -Milliseconds 1000
+    Refresh-UninstallList
+}
+
+$uninstallTimer.Add_Tick({
+    try {
+        if (-not $Script:UninstallRun) { $uninstallTimer.Stop(); return }
+        if ($Script:UninstallRun.Queue.Count -eq 0) { Complete-UninstallRun; return }
+
+        $app = $Script:UninstallRun.Queue.Dequeue()
+        $Script:UninstallRun.Index++
+        $pct = [int](($Script:UninstallRun.Index / [double]$Script:UninstallRun.Total) * 100)
+        $progress.Value = [Math]::Min(100,[Math]::Max(0,$pct))
+        $statusLabel.Text = "Uninstalling: $($app.DisplayName)"
+
+        try {
+            $ok = Invoke-UninstallApp -App $app -OutputBox $outputBox -StatusLabel $statusLabel
+            if ($ok) {
+                [void]$Script:UninstallRun.Done.Add($app.DisplayName)
+                if ($Script:UninstallRun.DeepClean) {
+                    Invoke-DeepClean -App $app -OutputBox $outputBox -StatusLabel $statusLabel
+                }
+            } else {
+                $Script:UninstallRun.HadErrors = $true
+            }
+        } catch {
+            $Script:UninstallRun.HadErrors = $true
+            Write-Log -Message "  ERROR during uninstall: $($_.Exception.Message)" -OutputBox $outputBox -Color $Script:Colors.Danger -StatusLabel $statusLabel
+        }
+    } catch { $uninstallTimer.Stop(); Set-UiRunningState -IsRunning $false; Write-Log -Message "Uninstall engine error: $($_.Exception.Message)" -OutputBox $outputBox -Color $Script:Colors.Danger -StatusLabel $statusLabel }
+})
+
+#------------------------------------------------------------------------------------------------
 # 14) UI Events
 #------------------------------------------------------------------------------------------------
+
+# Tweak tab events
 $btnSelectAll.Add_Click({
     foreach ($cb in $Script:CheckBoxes.Values) { if ($cb.Enabled) { $cb.Checked = $true } }
 })
@@ -1771,15 +2194,7 @@ $btnDeselectAll.Add_Click({
     foreach ($cb in $Script:CheckBoxes.Values) { $cb.Checked = $false }
 })
 $btnRecommended.Add_Click({
-    # Recommended: Low risk Privacy & Performance; Low risk Maintenance cache clears.
-    # Excludes: High risk tweaks, heavy DISM/SFC ops, destructive cleanup, read-only diagnostics.
-    $heavyMaint = @(
-        "maint_dism_restorehealth",
-        "maint_sfc_scannow",
-        "maint_onedrive_health",
-        "maint_dism_cleanup",    # Destructive/irreversible — require explicit selection
-        "maint_driver_diag"      # Read-only diagnostic — exclude from auto-Recommended
-    )
+    $heavyMaint = @("maint_dism_restorehealth","maint_sfc_scannow","maint_onedrive_health","maint_dism_cleanup","maint_driver_diag")
     foreach ($t in $Script:Tweaks) {
         $cb = $Script:CheckBoxes[$t.Id]
         if (-not $cb -or -not $cb.Enabled) { if ($cb) { $cb.Checked = $false }; continue }
@@ -1795,8 +2210,8 @@ $btnCancel.Add_Click({
 })
 $btnExportLog.Add_Click({
     $dlg = New-Object System.Windows.Forms.SaveFileDialog
-    $dlg.Title  = "Export Log"
-    $dlg.Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*"
+    $dlg.Title    = "Export Log"
+    $dlg.Filter   = "Text files (*.txt)|*.txt|All files (*.*)|*.*"
     $dlg.FileName = "SwiftTune_Log_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
     if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         try {
@@ -1824,7 +2239,6 @@ $btnApply.Add_Click({
         $r = [System.Windows.Forms.MessageBox]::Show($msg,"Confirm High Risk","YesNo","Warning")
         if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
     }
-    # Extra confirmation for irreversible destructive tweaks
     $destructive = @($Script:Tweaks | Where-Object { ($selected -contains $_.Id) -and ($_.Id -eq "maint_dism_cleanup") })
     if ($destructive.Count -gt 0) {
         $r2 = [System.Windows.Forms.MessageBox]::Show(
@@ -1837,43 +2251,82 @@ $btnApply.Add_Click({
 
 $btnUndoLast.Add_Click({
     $p = Load-LastBackupPath
-    if (-not $p) {
-        [System.Windows.Forms.MessageBox]::Show("No last-run backup manifest found.","Undo Last Run","OK","Information") | Out-Null
-        return
-    }
+    if (-not $p) { [System.Windows.Forms.MessageBox]::Show("No last-run backup manifest found.","Undo Last Run","OK","Information") | Out-Null; return }
     $ans = [System.Windows.Forms.MessageBox]::Show("This will restore settings captured in:`r`n$p`r`n`r`nProceed?","Undo Last Run","YesNo","Warning")
     if ($ans -ne "Yes") { return }
-    try {
-        Restore-FromManifest -ManifestPath $p -OutputBox $outputBox -StatusLabel $statusLabel
-        Refresh-TweakStates
-    } catch {
-        Write-Log -Message "ERROR: Restore failed -> $($_.Exception.Message)" -OutputBox $outputBox -Color Red -StatusLabel $statusLabel
+    try { Restore-FromManifest -ManifestPath $p -OutputBox $outputBox -StatusLabel $statusLabel; Refresh-TweakStates }
+    catch { Write-Log -Message "ERROR: Restore failed -> $($_.Exception.Message)" -OutputBox $outputBox -Color $Script:Colors.Danger -StatusLabel $statusLabel }
+})
+
+# Uninstaller tab events
+$btnUninstRefresh.Add_Click({ Refresh-UninstallList })
+
+$txtSearch.Add_TextChanged({
+    if ($Script:AllInstalledApps.Count -gt 0) { Populate-UninstallList -Filter $txtSearch.Text }
+})
+
+$btnUninstSelectAll.Add_Click({
+    foreach ($item in $uninstListView.Items) { $item.Checked = $true }
+})
+
+$btnUninstDeselectAll.Add_Click({
+    foreach ($item in $uninstListView.Items) { $item.Checked = $false }
+})
+
+$uninstListView.Add_ItemChecked({
+    $checked = @($uninstListView.CheckedItems).Count
+    $lblSelectedCount.Text = "$checked selected"
+})
+
+$btnUninstallSelected.Add_Click({
+    if ($Script:UninstallRun) { return }
+    $appsToRemove = @()
+    foreach ($item in $uninstListView.CheckedItems) {
+        if ($item.Tag) { $appsToRemove += $item.Tag }
+    }
+    if ($appsToRemove.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Check at least one application to uninstall.","Nothing Selected","OK","Information") | Out-Null
+        return
+    }
+
+    $nameList = ($appsToRemove | ForEach-Object { "  - $($_.DisplayName)" }) -join "`r`n"
+    $deepStr  = if ($cbDeepClean.Checked) { "`r`n`r`nDeep Clean is enabled: leftover files and registry keys will also be removed." } else { "" }
+    $msg = "The following $($appsToRemove.Count) application(s) will be uninstalled:`r`n`r`n$nameList$deepStr`r`n`r`nProceed?"
+    $r = [System.Windows.Forms.MessageBox]::Show($msg,"Confirm Uninstall","YesNo","Warning")
+    if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+    Start-UninstallRun -AppsToRemove $appsToRemove -DeepClean ([bool]$cbDeepClean.Checked)
+})
+
+# Load uninstaller list when its tab is first selected
+$tabs.Add_SelectedIndexChanged({
+    if ($tabs.SelectedTab -eq $tabUninstaller -and $Script:AllInstalledApps.Count -eq 0) {
+        Refresh-UninstallList
     }
 })
 
 $mainForm.Add_Shown({
-    Write-Log -Message "$($Script:AppName) v$($Script:AppVersion) ready." -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel
-    Write-Log -Message "Backups: $Script:BackupRoot" -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel
-    Write-Log -Message "Session log: $Script:SessionLog" -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel
+    Write-Log -Message "$($Script:AppName) v$($Script:AppVersion) ready." -OutputBox $outputBox -Color $Script:Colors.TextMuted -StatusLabel $statusLabel
+    Write-Log -Message "Backups: $Script:BackupRoot" -OutputBox $outputBox -Color $Script:Colors.TextMuted -StatusLabel $statusLabel
+    Write-Log -Message "Session log: $Script:SessionLog" -OutputBox $outputBox -Color $Script:Colors.TextMuted -StatusLabel $statusLabel
 
     try {
         $cs = Get-CimInstance -ClassName Win32_ComputerSystem
         $domainInfo = if ($cs.PartOfDomain) { "Domain: $($cs.Domain)" } else { "Workgroup: $($cs.Workgroup)" }
-        Write-Log -Message "Machine: $($cs.Name) | $domainInfo | RAM: $([math]::Round($cs.TotalPhysicalMemory/1GB,1)) GB" -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel
+        Write-Log -Message "Machine: $($cs.Name) | $domainInfo | RAM: $([math]::Round($cs.TotalPhysicalMemory/1GB,1)) GB" -OutputBox $outputBox -Color $Script:Colors.TextMuted -StatusLabel $statusLabel
 
-        # Domain-join VBS advisory (v4.1)
         if ($cs.PartOfDomain) {
-            Write-Log -Message "NOTE: Domain-joined machine. 'Disable VBS' is blocked here by design." -OutputBox $outputBox -Color Gold -StatusLabel $statusLabel
-            Write-Log -Message "      To disable VBS/HVCI via GPO: Computer Config > Admin Templates > System > Device Guard > Turn On VBS = Disabled." -OutputBox $outputBox -Color Gold -StatusLabel $statusLabel
+            Write-Log -Message "NOTE: Domain-joined machine. 'Disable VBS' is blocked here by design." -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
+            Write-Log -Message "      To disable VBS/HVCI via GPO: Computer Config > Admin Templates > System > Device Guard > Turn On VBS = Disabled." -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
         }
     } catch { }
 
     $freeGB = Get-DriveFreeGB
-    if ($null -ne $freeGB) { Write-Log -Message "C: drive free space: $freeGB GB" -OutputBox $outputBox -Color Silver -StatusLabel $statusLabel }
+    if ($null -ne $freeGB) { Write-Log -Message "C: drive free space: $freeGB GB" -OutputBox $outputBox -Color $Script:Colors.TextMuted -StatusLabel $statusLabel }
 
     $vbsCb = $Script:CheckBoxes["perf_vbs_disable"]
     if ($vbsCb -and -not $vbsCb.Enabled) {
-        Write-Log -Message "NOTE: 'Disable VBS' is unavailable on this machine (domain-joined or Intune-enrolled)." -OutputBox $outputBox -Color Gold -StatusLabel $statusLabel
+        Write-Log -Message "NOTE: 'Disable VBS' is unavailable on this machine (domain-joined or Intune-enrolled)." -OutputBox $outputBox -Color $Script:Colors.Warning -StatusLabel $statusLabel
     }
 
     Refresh-TweakStates
