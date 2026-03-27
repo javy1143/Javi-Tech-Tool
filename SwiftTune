@@ -1,6 +1,11 @@
 #================================================================================================
 # StackPoint IT - Windows 11 Tuner / Optimization Tool
-# Version: 4.2
+# Version: 4.3
+# Changes from 4.2:
+#   - perf_powerplan: Now sets AC=100%/DC=80% max processor on High Performance plan
+#     instead of a flat 100% on both. Prevents battery drain when users unplug.
+#     Windows switches AC/DC values automatically — no task or trigger required.
+#================================================================================================
 # Changes from 4.1:
 #   - Added Uninstaller tab: Control Panel-style app list with batch removal
 #   - Uninstaller performs deep scan for leftover files and registry keys post-uninstall
@@ -62,7 +67,7 @@ $Script:MainRunspace = [System.Management.Automation.Runspaces.Runspace]::Defaul
 # 3) Paths, Constants & Color Palette
 #------------------------------------------------------------------------------------------------
 $Script:AppName    = "StackPoint IT - Windows 11 Tuner"
-$Script:AppVersion = "4.2"
+$Script:AppVersion = "4.3"
 $Script:DataRoot   = Join-Path $env:ProgramData "StackPointTuner"
 $Script:BackupRoot = Join-Path $Script:DataRoot "Backups"
 $Script:LogRoot    = Join-Path $Script:DataRoot "Logs"
@@ -728,20 +733,80 @@ $Script:Tweaks += New-Tweak `
     -Undo { param($ManifestPath,$OutputBox,$StatusLabel) Restore-FromManifest -ManifestPath $ManifestPath -OutputBox $OutputBox -StatusLabel $StatusLabel }
 
 $Script:Tweaks += New-Tweak `
-    -Id "perf_powerplan" -Name "Enable High Performance Power Plan" -Category "Performance" -Risk "Low" `
-    -Description "Switches the active power plan to High Performance to prevent CPU throttling." `
+    -Id "perf_powerplan" -Name "High Performance (AC) / Battery-Aware on DC" -Category "Performance" -Risk "Low" `
+    -Description "Activates High Performance plan. On AC: CPU runs at full speed. On battery: CPU max capped at 80%, min at 5% — preserving battery life without switching plans." `
     -GetState {
-        try { $a=(powercfg /getactivescheme); if ($a -match "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c") { "Applied" } else { "NotApplied" } } catch { "Unknown" }
+        try {
+            $active = & powercfg.exe /getactivescheme 2>&1
+            if ($active -notmatch "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c") { return "NotApplied" }
+            # Verify DC max processor has been constrained (not the 100% High Performance default)
+            $query  = & powercfg.exe /query 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c `
+                          54533251-82be-4824-96c1-47b60b740d00 `
+                          bc5038f7-23e0-4960-96da-33abaf5935ec 2>&1
+            $dcLine = $query | Where-Object { $_ -match "Current DC Power Setting Index:" }
+            if ($dcLine -match "0x([0-9a-fA-F]+)") {
+                $dcVal = [Convert]::ToInt32($Matches[1], 16)
+                if ($dcVal -lt 100) { return "Applied" } else { return "Partial" }
+            }
+            return "Partial"
+        } catch { return "Unknown" }
     } `
     -Apply {
-        param($BackupCtx,$OutputBox,$StatusLabel)
-        Write-Log -Message "--- High Performance Power Plan ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
-        try { & powercfg.exe -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c | Out-Null; Write-Log -Message "Power plan set to High Performance." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
-        catch { Write-Log -Message "Failed to change power plan." -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel }
+        param($BackupCtx, $OutputBox, $StatusLabel)
+        Write-Log -Message "--- High Performance (AC) / Battery-Aware (DC) Power Plan ---" -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel
+
+        $hpGuid    = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+        $procGroup = "54533251-82be-4824-96c1-47b60b740d00"
+        $maxProc   = "bc5038f7-23e0-4960-96da-33abaf5935ec"
+        $minProc   = "893dee8e-2bef-41e0-89c6-b55d0929964c"
+
+        # Step 1: Activate High Performance plan
+        try {
+            & powercfg.exe -setactive $hpGuid | Out-Null
+            Write-Log -Message "Active plan set: High Performance." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
+        } catch {
+            Write-Log -Message "Failed to activate High Performance plan: $($_.Exception.Message)" -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel
+            return
+        }
+
+        # Step 2: AC — full performance (100% max, 100% min)
+        try { & powercfg.exe /setacvalueindex $hpGuid $procGroup $maxProc 100 | Out-Null
+              Write-Log -Message "AC: max processor state = 100%." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+        catch { Write-Log -Message "Warning: could not set AC max processor state." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
+
+        try { & powercfg.exe /setacvalueindex $hpGuid $procGroup $minProc 100 | Out-Null
+              Write-Log -Message "AC: min processor state = 100%." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+        catch { Write-Log -Message "Warning: could not set AC min processor state." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
+
+        # Step 3: DC (battery) — throttled to preserve battery life
+        try { & powercfg.exe /setdcvalueindex $hpGuid $procGroup $maxProc 80 | Out-Null
+              Write-Log -Message "DC: max processor state = 80% (battery saver)." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+        catch { Write-Log -Message "Warning: could not set DC max processor state." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
+
+        try { & powercfg.exe /setdcvalueindex $hpGuid $procGroup $minProc 5 | Out-Null
+              Write-Log -Message "DC: min processor state = 5% (battery saver)." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel }
+        catch { Write-Log -Message "Warning: could not set DC min processor state." -OutputBox $OutputBox -Color $Script:Colors.Warning -StatusLabel $StatusLabel }
+
+        # Step 4: Re-activate to flush new DC/AC values into effect immediately
+        try { & powercfg.exe -setactive $hpGuid | Out-Null } catch { }
+
+        Write-Log -Message "Power plan applied. Plugged in: 100% CPU. On battery: 5-80% CPU." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
     } `
     -Undo {
-        param($ManifestPath,$OutputBox,$StatusLabel)
-        try { & powercfg.exe -setactive 381b4222-f694-41f0-9685-ff5bb260df2e | Out-Null; Write-Log -Message "Reverted to Balanced power plan." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel } catch { }
+        param($ManifestPath, $OutputBox, $StatusLabel)
+        $hpGuid    = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+        $procGroup = "54533251-82be-4824-96c1-47b60b740d00"
+        $maxProc   = "bc5038f7-23e0-4960-96da-33abaf5935ec"
+        $minProc   = "893dee8e-2bef-41e0-89c6-b55d0929964c"
+        # Reset HP plan DC values back to defaults (100%), then restore Balanced as active
+        try { & powercfg.exe /setdcvalueindex $hpGuid $procGroup $maxProc 100 | Out-Null } catch { }
+        try { & powercfg.exe /setdcvalueindex $hpGuid $procGroup $minProc 100 | Out-Null } catch { }
+        try {
+            & powercfg.exe -setactive 381b4222-f694-41f0-9685-ff5bb260df2e | Out-Null
+            Write-Log -Message "Reverted: active plan restored to Balanced. HP plan DC values reset to 100%." -OutputBox $OutputBox -Color $Script:Colors.Success -StatusLabel $StatusLabel
+        } catch {
+            Write-Log -Message "Undo failed: $($_.Exception.Message)" -OutputBox $OutputBox -Color $Script:Colors.Danger -StatusLabel $StatusLabel
+        }
     }
 
 $Script:Tweaks += New-Tweak `
